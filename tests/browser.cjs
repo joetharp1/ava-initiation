@@ -45,6 +45,10 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(await page.evaluate(()=>fixture.c.chatCompletionSettings.stream_openai),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('STATE TRACKER fixture'))),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('do not continue or answer'))),true);
+  assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('Do not include a name or timestamp header, just the message body'))),true);
+  const deviceStamp=await page.evaluate(()=>({now:Date.now(),sent:fixture.c.chat[0].send_date,meta:fixture.c.chat[0].extra.ava_initiation.timestamp}));
+  assert.equal(typeof deviceStamp.sent,'number');assert.equal(deviceStamp.meta,deviceStamp.sent);
+  assert.ok(Math.abs(deviceStamp.now-deviceStamp.sent)<5000,'message timestamp must use browser clock');
   assert.equal(await page.locator('#ava-unread-float').isVisible(),true);
   assert.match(await page.locator('#ava-notifications').innerText(),/permission denied/i);
   assert.match(await page.locator('#ava-notification-log').textContent(),/Notification permission: denied/);
