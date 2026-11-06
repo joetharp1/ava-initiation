@@ -37,6 +37,7 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   await page.locator('#ava-fire').click();assert.equal(await page.locator('.message').count(),0);
   // Permission-denied path leaves an in-page badge after delivery.
   await page.evaluate(()=>{Notification.requestPermission=async()=> 'denied'});
+  await page.locator('[data-setting=browserNotifications]').check();await page.waitForTimeout(100);
   await page.locator('#ava-allow').check();await page.waitForTimeout(100);
   await page.locator('[data-setting=enabled]').check();await page.waitForTimeout(100);
   await page.locator('#ava-fire').click();await page.waitForFunction(()=>document.querySelectorAll('.message').length===1);
@@ -130,14 +131,60 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   await page.waitForFunction(()=>document.querySelectorAll('.message').length===3);
   assert.equal(await page.locator('.message').last().innerText(),'Manual retry succeeded');
   await page.waitForTimeout(200);
-  // Registration failures must be distinguishable from permission denial.
+  // A protected worker is optional; Telegram remains independent of its 401.
   await page.locator('[data-setting=enabled]').uncheck();await page.waitForTimeout(200);
-  await page.evaluate(()=>{navigator.serviceWorker.register=async()=>{throw Error('Injected registration failure')}});
+  await page.evaluate(()=>{navigator.serviceWorker.register=async()=>{throw Error('A bad HTTP response code (401) was received when fetching the script.')}});
   await page.locator('[data-setting=enabled]').check();
-  await page.waitForFunction(()=>document.querySelector('#ava-notifications').textContent.includes('Injected registration failure'));
+  await page.waitForFunction(()=>document.querySelector('#ava-notifications').textContent.includes('requires sign-in'));
   assert.equal(await page.evaluate(()=>Notification.permission),'granted');
-  assert.match(await page.locator('#ava-notification-log').textContent(),/setup failed.*Injected registration failure/);
+  assert.doesNotMatch(await page.locator('#ava-notifications').innerText(),/setup failed|error/i);
+  const telegramRequests=[];let rejectTelegram=false;
+  await page.route('https://api.telegram.org/**', async route=>{
+   telegramRequests.push(new URLSearchParams(route.request().postData()));
+   if(rejectTelegram)await route.fulfill({status:401,contentType:'application/json',body:'{"ok":false}'});
+   else await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+  });
+  const fakeToken='123456789:TEST_ONLY_NOT_A_REAL_TOKEN_12345';
+  await page.locator('#ava-telegram-token').fill(fakeToken);
+  await page.locator('#ava-telegram-token').press('Tab');
+  await page.locator('[data-setting=telegramChatId]').fill('-123456789');
+  await page.locator('[data-setting=telegramChatId]').press('Tab');await page.waitForTimeout(100);
+  await page.locator('[data-setting=telegramEnabled]').check();await page.waitForTimeout(100);
+  await page.locator('#ava-fire').click();
+  await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('notification sent'));
+  assert.equal(telegramRequests.length,1);assert.equal(telegramRequests[0].get('text'),'Ava');
+  assert.equal(telegramRequests[0].get('disable_notification'),'true');assert.equal(telegramRequests[0].get('chat_id'),'-123456789');
+  assert.equal(await page.locator('.message').count(),4);
+  const secretCheck=await page.evaluate(async()=>({db:localStorage.getItem('ava-initiation:v1:test-user:data'),
+   token:localStorage.getItem('ava-initiation:v1:test-user:telegram-token'),
+   settings:JSON.stringify((await import('/scripts/extensions.js')).extension_settings),prompt:JSON.stringify(fixture.request),
+   diagnostics:document.querySelector('#ava-notification-log').textContent}));
+  assert.equal(secretCheck.token,fakeToken);
+  for(const key of ['db','settings','prompt','diagnostics'])assert.ok(!secretCheck[key].includes(fakeToken),key+' must not contain token');
+  await page.locator('[data-setting=preview]').selectOption('full');await page.waitForTimeout(100);
+  await page.evaluate(()=>{fixture.output=JSON.stringify({text:'A'.repeat(250)})});
+  await page.locator('#ava-fire').click();
+  await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('notification sent'));
+  assert.equal(telegramRequests.length,2);assert.equal(telegramRequests[1].get('text'),'A'.repeat(200));
+  assert.equal(telegramRequests[1].get('disable_notification'),'false');
+  // A notification failure cannot undo a delivered chat message or trigger retry.
+  rejectTelegram=true;
+  await page.locator('#ava-fire').click();
+  await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('delivery unavailable'));
+  assert.equal(await page.locator('.message').count(),6);assert.equal(telegramRequests.length,3);
+  assert.equal(await page.locator('#ava-unread-float').isVisible(),true);
+  const afterFailure=await page.evaluate(()=>JSON.parse(localStorage.getItem('ava-initiation:v1:test-user:data')));
+  assert.equal(afterFailure.chats['["A","chat-granted"]'].state,'sent');
+  await page.waitForTimeout(300);assert.equal(telegramRequests.length,3);
+  // Turning browser notifications off prevents registration even after reload.
+  await page.locator('[data-setting=browserNotifications]').uncheck();await page.waitForTimeout(100);
+  await page.addInitScript(()=>{globalThis.registrationAttempts=0;navigator.serviceWorker.register=async()=>{registrationAttempts++;throw Error('must remain optional')}});
+  await page.reload();await page.locator('#ava-fire').waitFor();
+  assert.equal(await page.evaluate(()=>registrationAttempts),0);
+  assert.equal(await page.locator('[data-setting=telegramChatId]').inputValue(),'-123456789');
+  assert.equal(await page.locator('#ava-telegram-token').inputValue(),fakeToken);
+  assert.match(await page.locator('#ava-notifications').innerText(),/notifications off/);
   assert.equal(errors.length,0,errors.join('\n'));
-  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; registration failure distinguished from denied permission.');
+  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; optional worker 401; Telegram full/generic delivery, 200-character cap, local token isolation, failed notification badge, no retry and reload persistence.');
  }finally{await browser.close();server.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});
