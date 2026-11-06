@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.2 — two-file client-only extension for ST 1.19.0.
+/* Ava Initiation 0.1.3 — two-file client-only extension for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -517,7 +517,7 @@ export async function bootPage() {
       #ava-initiation-settings .ava-body{height:480px;max-height:65dvh;overflow:auto;box-sizing:border-box;padding:8px;min-width:0;}
       #ava-initiation-settings .inline-drawer-content{height:auto!important;max-height:none!important;overflow:visible!important;}
       #ava-initiation-settings label{display:flex;align-items:center;gap:8px;margin:9px 0;flex-wrap:wrap;}
-      #ava-initiation-settings input[type=number],#ava-initiation-settings input[type=time],#ava-initiation-settings select{max-width:100%;min-width:100px;}
+      #ava-initiation-settings input[type=number],#ava-initiation-settings input[type=time],#ava-initiation-settings select{max-width:100%;min-width:100px;background-color:var(--SmartThemeBlurTintColor,#202020);color:var(--SmartThemeBodyColor,#f5f5f5);-webkit-text-fill-color:var(--SmartThemeBodyColor,#f5f5f5);border:1px solid var(--SmartThemeBorderColor,#666);border-radius:5px;padding:8px;min-height:44px;font:inherit;}
       #ava-initiation-settings button{display:block;width:100%;min-height:44px;white-space:normal;word-break:normal;margin:8px 0;padding:10px;}
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
@@ -526,18 +526,18 @@ export async function bootPage() {
     <div class="inline-drawer-content"><div class="ava-body">
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
-      <label>Minimum minutes <input type="number" min="1" max="10080" data-setting="min"></label>
-      <label>Maximum minutes <input type="number" min="1" max="10080" data-setting="max"></label>
-      <label>Quiet hours start <input type="time" data-setting="quietStart"></label>
-      <label>Quiet hours end <input type="time" data-setting="quietEnd"></label>
-      <label>Notification preview <select data-setting="preview"><option value="generic">Ava only</option><option value="full">Full message</option></select></label>
-      <label>Daily photo budget (USD) <input type="number" min="0" max="100" step="0.01" data-setting="creditUsd"></label>
+      <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
+      <label>Maximum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="max"></label>
+      <label>Quiet hours start <input class="text_pole" type="time" data-setting="quietStart"></label>
+      <label>Quiet hours end <input class="text_pole" type="time" data-setting="quietEnd"></label>
+      <label>Notification preview <select class="text_pole" data-setting="preview"><option value="generic">Ava only</option><option value="full">Full message</option></select></label>
+      <label>Daily photo budget (USD) <input class="text_pole" type="number" min="0" max="100" step="0.01" data-setting="creditUsd"></label>
       <p id="ava-budget"></p><p>At most two charged photo attempts per local calendar day across all companions. Failed provider attempts count. Text continues when photos reach either cap. Equal quiet times disable quiet hours.</p>
       <button type="button" class="menu_button" id="ava-fire">Fire now</button>
       <button type="button" class="menu_button" id="ava-read">Mark initiations read</button>
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.2 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.3 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     const floating = document.createElement('button'); floating.id = 'ava-unread-float'; floating.hidden = true; document.body.append(floating);

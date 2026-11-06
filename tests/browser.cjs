@@ -21,7 +21,7 @@ const mocks = {
  globalThis.fixture={calls:0,hang:false,c:{avatar:'A',characterId:0,characters:[{avatar:'A'}],chatId:'chat-a',name2:'Test Companion',chat:[],mainApi:'openai',chatCompletionSettings:{stream_openai:true,function_calling:true,prompts:[]},getCharacterCardFields:()=>({description:'A fictional adult companion.'}),substituteParams:x=>x,getTokenCountAsync:async x=>Math.ceil(x.length/3),addOneMessage(m){const p=document.createElement('p');p.className='message';p.textContent=m.mes;document.getElementById('chat').append(p)},saveChat:async()=>{}}};
  globalThis.host={eventSource,event_types};`,
 };
-const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>*{box-sizing:border-box}body{font:16px system-ui;background:#202020;color:#eee;margin:12px}#extensions_settings{display:flex;flex-direction:column;width:100%}.inline-drawer-header{padding:12px;background:#333}.inline-drawer-content{display:block}input,select,button{font:inherit}button{cursor:pointer}#send_textarea{width:100%;height:60px}</style></head><body><div id="extensions_settings"></div><div id="following">Next extension</div><div id="chat"></div><textarea id="send_textarea"></textarea><script type="module" src="/scripts/extensions/third-party/ava-initiation/index.js"></script></body></html>`;
+const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>*{box-sizing:border-box}body{font:16px system-ui;background:#202020;color:#eee;margin:12px}#extensions_settings{display:flex;flex-direction:column;width:100%}.inline-drawer-header{padding:12px;background:#333}.inline-drawer-content{display:block}input,select,button{font:inherit}input{color:inherit;background:white}button{cursor:pointer}#send_textarea{width:100%;height:60px}</style></head><body><div id="extensions_settings"></div><div id="following">Next extension</div><div id="chat"></div><textarea id="send_textarea"></textarea><script type="module" src="/scripts/extensions/third-party/ava-initiation/index.js"></script></body></html>`;
 (async()=>{
  const server=http.createServer((req,res)=>{
   const p=req.url.split('?')[0];if(p==='/'){res.setHeader('Content-Type','text/html');res.end(html);return}
@@ -50,13 +50,18 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   // A draft must survive Fire now unchanged.
   await page.locator('#send_textarea').fill('An unfinished thought');await page.locator('#ava-fire').click();
   assert.equal(await page.locator('#send_textarea').inputValue(),'An unfinished thought');assert.equal(await page.locator('.message').count(),1);
+  // Reproduce the host's inherited light text on native white inputs, then
+  // verify Ava owns both colours and retains the number/time values.
+  const fieldColours=await page.evaluate(()=>[...document.querySelectorAll('#ava-initiation-settings input[type=number],#ava-initiation-settings input[type=time]')].map(el=>({value:el.value,bg:getComputedStyle(el).backgroundColor,fg:getComputedStyle(el).color,fill:getComputedStyle(el).webkitTextFillColor})));
+  assert.deepEqual(fieldColours.map(x=>x.value),['60','120','23:00','08:00','0.12']);
+  for(const c of fieldColours){assert.equal(c.bg,'rgb(32, 32, 32)');assert.equal(c.fg,'rgb(245, 245, 245)');assert.equal(c.fill,c.fg)}
   // No overflow or one-letter buttons on small screens; drawer owns its scroll.
   for(const width of [320,393,709,1024]){
    await page.setViewportSize({width,height:852});
    const bounds=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:innerWidth,body:document.querySelector('.ava-body').getBoundingClientRect().height,button:document.querySelector('#ava-fire').getBoundingClientRect().height,following:document.querySelector('#following').getBoundingClientRect().top,bottom:document.querySelector('#ava-initiation-settings').getBoundingClientRect().bottom}));
    assert.ok(bounds.width<=bounds.viewport,JSON.stringify(bounds));assert.ok(bounds.button>=44);assert.ok(bounds.body<=554);assert.ok(bounds.following>=bounds.bottom-1);
   }
-  await page.setViewportSize({width:393,height:852});await page.locator('#ava-status').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(root,'tests/mobile-check.png')});
+  await page.setViewportSize({width:393,height:852});await page.locator('[data-setting=min]').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(root,'tests/mobile-check.png')});
   // Granted-permission path. This headless Chromium build always reports native
   // permission denied, even after grantPermissions. Model the permission grant
   // explicitly and spy on the real module worker's showNotification boundary.

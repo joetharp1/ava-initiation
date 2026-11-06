@@ -1,4 +1,4 @@
-# Ava Initiation 0.1.2
+# Ava Initiation 0.1.3
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
 
@@ -27,9 +27,9 @@ The PWA must remain open. Android may suspend it in the background; on return, A
 
 ## Reviewed fixes in 0.1.2
 
-Preset body parameters are merged, delivery reconciliation is guarded, fenced JSON/plain-prose fallback is supported, and the granted-permission notification path is covered. ST's `jsonSchema.returnInvalid` is enabled so fallback receives the provider's original text. The reviewed runtime file is unchanged in this repository.
+Preset body parameters are merged, delivery reconciliation is guarded, fenced JSON/plain-prose fallback is supported, and the granted-permission notification path is covered. ST's `jsonSchema.returnInvalid` is enabled so fallback receives the provider's original text. Version 0.1.3 adds only scoped field styling and standard SillyTavern input classes so number/time values remain readable on mobile. Scheduling and generation logic are unchanged.
 
-SHA-256 `index.js`: `fae404202c9300960d83bf7876b96112ad3f7281f3f048540b159e6ffdd82346`.
+SHA-256 `index.js`: `ad345800ac8762ced1950dbf45a7399a23f857c8aa830880984b44ea1f6b1df0`.
 
 ## Validation
 
