@@ -1,0 +1,9 @@
+{
+  "display_name": "Ava Initiation",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "joetharp1",
+  "version": "0.1.2"
+}
