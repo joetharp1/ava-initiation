@@ -1,6 +1,12 @@
-# Ava Initiation 0.1.10
+# Ava Initiation 0.1.11
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Consume generation entry once (0.1.11)
+
+The private generation's `entering` flag is consumed before its first non-dry entry check. A subsequent same-generation continuation therefore skips the draft/busy entry guard. The Generate finally still clears the flag if generation throws before that event. User-send handoff remains a separate listener so a real user request restores the temporary prompt/request/tool hooks after the entry flag is consumed.
+
+Regression: the host/tool-result recursive generation event sequence enters once idle and again while busy, reaches the second model response and records one delivered message. The regression failed on 0.1.10 and passes here. Initiation tool execution remains disabled; this is an event-sequence regression, not a claim that a live initiation successfully executed a tool. User-send isolation and the 90-second waiting tests remain in the suite. No bridge, character prompt, image or memory settings changed.
 
 ## User-send isolation and unanswered wait (0.1.10)
 
@@ -83,7 +89,7 @@ Current runtime hashes are listed in `SHA256SUMS`.
 
 ## Validation
 
-Version 0.1.10 passes 80 Node checks with the ST source-contract check enabled, including user-send isolation, unanswered timer ticks, manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. Bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
+Version 0.1.11 passes 81 Node checks with the ST source-contract check enabled, including user-send isolation, unanswered timer ticks, manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. Bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
 
 The development-only Playwright browser harness verifies normal automatic firing with an exhausted 0.1.8 diagnostic quota, no new request logging, preserved diagnostic storage, Telegram test/full/generic behaviour, token migration, blocked-worker fallback, failure handling, drafts, device-clock timestamps and mobile layouts. Notification permission is controlled in the harness and Telegram is mocked; the module worker's display call is spied on. No real Telegram or paid provider calls are made in tests. Playwright is not an extension dependency.
 

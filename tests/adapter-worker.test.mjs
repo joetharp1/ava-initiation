@@ -258,3 +258,44 @@ test('dry runs bypass the initiation entry guard; own busy check still throws an
     host.Generate = async () => '{"text":"Recovered"}';
     assert.equal(await stageNormal({ host, tools, c, attempt: { guard() {} }, instruction: 'Initiate' }), 'Recovered');
 });
+
+test('tool-result continuation event sequence consumes entry guard once and delivers the final initiation', async () => {
+    const { fixture } = await import('./helpers.mjs');
+    globalThis.document = { getElementById: () => ({ value: '' }) };
+    const e = events(); let busy = false, passes = 0;
+    const tools = { canPerformToolCalls: () => true, registerFunctionToolsOpenAI: async () => {}, invokeFunctionTools: async () => {} };
+    const original = { ...tools };
+    const f = fixture({ photoStatus: () => ({ ready: false }), deliver: async attempt => {
+        const text = await stageNormal({ host, tools, c: f.c, attempt, instruction: 'Initiate' });
+        const message = { mes: text, extra: { ava_initiation: { attemptId: attempt.id } } };
+        f.c.chat.push(message); attempt.onPublished(f.c.chat.length - 1, message);
+    } });
+    Object.assign(f.c, { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } });
+    const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' }, isGenerating: () => busy,
+        async Generate(type, options) {
+            passes++;
+            await e.emit('commands', type, options, false);
+            const prompt = { chat: [{ role: 'user', content: 'Previous exchange' }] };
+            await e.emit('prompt', prompt);
+            const request = { messages: prompt.chat, stream: true };
+            await e.emit('request', request);
+            assert.equal(request.stream, false);
+            if (passes === 1) {
+                busy = true;
+                // Model a host/tool-result recursion. No real tool is invoked:
+                // initiations deliberately retain their existing no-tool policy.
+                return host.Generate('normal', { automatic_trigger: options.automatic_trigger, depth: 1 });
+            }
+            assert.equal(busy, true, 'ST is still generating at the recursive entry');
+            return '{"text":"A new opening after the continuation."}';
+        } };
+    await f.engine.tick(true);
+    assert.equal(passes, 2);
+    assert.equal(f.c.chat.length, 1);
+    assert.equal(f.c.chat[0].mes, 'A new opening after the continuation.');
+    assert.equal(f.state().state, 'sent'); assert.equal(f.engine.fatal, null);
+    assert.equal(f.db.log.filter(r => r.outcome === 'sent').length, 1);
+    assert.deepEqual(tools, original);
+    assert.equal(f.c.chatCompletionSettings.stream_openai, true);
+    assert.ok([...e.handlers.values()].every(list => !list.length));
+});

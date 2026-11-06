@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.10 — user-send isolation and unanswered wait for ST 1.19.0.
+/* Ava Initiation 0.1.11 — user-send isolation and unanswered wait for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -498,13 +498,15 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         replace(tools, 'invokeFunctionTools', async () => { throw new Error('Tools are disabled for initiations.'); });
         // Preserve ST's normal prompt assembly and injection pipeline, including
         // World Info/state trackers. Only model-invoked tools are suppressed.
+        // A user send owns its prompt and tools even after our entry flag has
+        // been consumed. Keep this handoff separate from the one-pass guard.
         listen(host.event_types.GENERATION_AFTER_COMMANDS, (type, options, dry) => {
-            if (dry !== false || !entering) return;
-            if (type !== 'normal' || !options?.automatic_trigger) {
-                // A user send owns its prompt and tools. Release every temporary
-                // hook now, and discard our late result instead of throwing into it.
-                superseded = true; restore(); return;
-            }
+            if (dry || type === 'normal' && options?.automatic_trigger) return;
+            superseded = true; restore();
+        });
+        listen(host.event_types.GENERATION_AFTER_COMMANDS, (type, options, dry) => {
+            if (dry || !entering) return;
+            entering = false;
             check();
             if (String(document.getElementById('send_textarea')?.value || '') || host.isGenerating()) {
                 throw new Error('Composer or generation became busy before initiation.');
@@ -776,7 +778,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.10 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.11 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
