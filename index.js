@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.9 — normal scheduling restored for ST 1.19.0.
+/* Ava Initiation 0.1.10 — user-send isolation and unanswered wait for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -13,6 +13,8 @@ export const DEFAULTS = Object.freeze({ enabled: false, allow: {}, min: 60, max:
     browserNotifications: false, telegramEnabled: false, telegramChatId: '' });
 const SCHEMA = { name: 'ava_initiation', strict: true, returnInvalid: true, value: { type: 'object',
     properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } };
+// True only while this module is entering its own private Generate call.
+let entering = false;
 export const chatKey = c => JSON.stringify([c.avatar, c.chatId]);
 export function validateConfig(value) {
     const c = { ...DEFAULTS, ...value, allow: { ...(value?.allow || {}) } };
@@ -220,6 +222,9 @@ export function createEngine(d) {
             if (manual && s.pending) s.pending.manual = true;
             save(db);
             const p = s.pending;
+            if (s.unansweredAt != null && !p && s.unansweredAt + 90000 > t) {
+                report('Waiting for reply.'); return;
+            }
             if (!p) { report(s.unansweredAt == null ? 'Waiting for the next interval.' : 'Sent. Waiting for a reply.'); return; }
             if (!p.manual && s.retryAt > t) { report('Waiting for failure backoff.'); return; }
             if (!p.manual && quietAt(t, db.config)) { report('Quiet hours: missed slots will be coalesced on wake.'); return; }
@@ -454,7 +459,17 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
     if (c.mainApi !== 'openai' || typeof host.Generate !== 'function') throw new Error('Ava Initiation requires SillyTavern 1.19 Chat Completion mode.');
     const settings = c.chatCompletionSettings;
     const streamBefore = settings.stream_openai;
-    const undos = [], check = () => { attempt.guard(); };
+    let restored = false, superseded = false;
+    const undos = [], check = () => {
+        if (superseded) throw new Error('Initiation superseded by another generation; nothing was sent.');
+        attempt.guard();
+    };
+    const restore = () => {
+        if (restored) return;
+        restored = true; entering = false;
+        for (const undo of undos.reverse()) undo();
+        if (settings.stream_openai === false) settings.stream_openai = streamBefore;
+    };
     let assembly = null, captured = false;
     const replace = (object, key, value) => {
         const old = object[key]; object[key] = value;
@@ -484,7 +499,12 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         // Preserve ST's normal prompt assembly and injection pipeline, including
         // World Info/state trackers. Only model-invoked tools are suppressed.
         listen(host.event_types.GENERATION_AFTER_COMMANDS, (type, options, dry) => {
-            if (!dry && (type !== 'normal' || !options?.automatic_trigger)) throw new Error('Another generation tried to enter an initiation.');
+            if (dry !== false || !entering) return;
+            if (type !== 'normal' || !options?.automatic_trigger) {
+                // A user send owns its prompt and tools. Release every temporary
+                // hook now, and discard our late result instead of throwing into it.
+                superseded = true; restore(); return;
+            }
             check();
             if (String(document.getElementById('send_textarea')?.value || '') || host.isGenerating()) {
                 throw new Error('Composer or generation became busy before initiation.');
@@ -512,7 +532,13 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
             data.venice_parameters = { ...(data.venice_parameters || {}), enable_web_search: 'off', enable_web_scraping: false };
         });
         check();
-        const result = await host.Generate('normal', { automatic_trigger: true, jsonSchema: SCHEMA });
+        let result;
+        entering = true;
+        try {
+            result = await host.Generate('normal', { automatic_trigger: true, jsonSchema: SCHEMA });
+        } finally {
+            if (!restored) entering = false;
+        }
         check();
         const raw = typeof result === 'string' || result instanceof String ? String(result) : (result?.text ?? '');
         const stripped = (typeof raw === 'string' ? raw : '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -532,8 +558,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         if (text.length > (attempt.type === 'photo' ? 1500 : 2000)) throw new Error('Initiation exceeded its output limit.');
         return text;
     } finally {
-        for (const undo of undos.reverse()) undo();
-        if (settings.stream_openai === false) settings.stream_openai = streamBefore;
+        restore();
     }
 }
 
@@ -751,7 +776,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.9 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.10 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();

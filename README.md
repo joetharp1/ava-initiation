@@ -1,6 +1,14 @@
-# Ava Initiation 0.1.9
+# Ava Initiation 0.1.10
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## User-send isolation and unanswered wait (0.1.10)
+
+The generation entry guard runs only during this extension's own non-dry Generate call. A normal user send releases the initiation's temporary prompt, request and tool hooks, reaches the model with its own settings, and supersedes the pending initiation result. The entering flag clears even when Generate throws. Draft and busy checks still protect the initiation itself.
+
+An explicit 90-second unanswered/no-pending bound reports “Waiting for reply.” on timer ticks. Expiry does not create another send: the existing single 25-minute follow-up remains unchanged. Fire now retains its manual override. No character instructions, memory content, model temperature, Telegram credentials or other extensions are changed.
+
+Regression coverage exercises a real pending scheduler attempt through the generation hooks, confirms the user request reaches the model boundary unchanged, and verifies the late initiation is discarded. Additional checks cover dry runs, failure cleanup and five-second scheduler ticks across the 90-second boundary and 25-minute follow-up.
 
 ## Normal scheduling restored (0.1.9)
 
@@ -71,14 +79,14 @@ When both token and chat ID are present, worker setup is skipped entirely, even 
 
 Preset body parameters are merged, delivery reconciliation is guarded, fenced JSON/plain-prose fallback is supported, and the granted-permission notification path is covered. ST's `jsonSchema.returnInvalid` is enabled so fallback receives the provider's original text. Version 0.1.3 adds only scoped field styling and standard SillyTavern input classes so number/time values remain readable on mobile. Scheduling and generation logic are unchanged.
 
-SHA-256 `index.js`: `c67b73175d2e2180aa7e6177fc3dae55a86c35508fd3c9522ae419dc597b1814`.
+Current runtime hashes are listed in `SHA256SUMS`.
 
 ## Validation
 
-The combined suite passes 132 Node checks, including manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. This repository carries the scheduler/adapter/worker tests; bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
+Version 0.1.10 passes 80 Node checks with the ST source-contract check enabled, including user-send isolation, unanswered timer ticks, manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. Bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
 
 The development-only Playwright browser harness verifies normal automatic firing with an exhausted 0.1.8 diagnostic quota, no new request logging, preserved diagnostic storage, Telegram test/full/generic behaviour, token migration, blocked-worker fallback, failure handling, drafts, device-clock timestamps and mobile layouts. Notification permission is controlled in the harness and Telegram is mocked; the module worker's display call is spied on. No real Telegram or paid provider calls are made in tests. Playwright is not an extension dependency.
 
 ## Deferred follow-ups
 
-The reviewed release retains the five-second storage write, `pagehide` cancellation, the `isGenerating()` check in `GENERATION_AFTER_COMMANDS`, and the bridge's combined busy/configuration readiness status.
+The reviewed release retains the five-second storage write, `pagehide` cancellation, the initiation-only `isGenerating()` check, and the bridge's combined busy/configuration readiness status.

@@ -198,3 +198,63 @@ test('page ready rejection diagnostic is observed without unhandled rejection', 
     observeServiceWorkerReady({ ready: Promise.reject(new Error('test failure')) }, x => messages.push(x), { setTimer: () => 1, clearTimer() {} });
     await Promise.resolve(); assert.ok(messages.some(x => x.includes('rejected (test failure)')));
 });
+
+test('a user generation reaches the model while an initiation is pending', async () => {
+    const { fixture } = await import('./helpers.mjs');
+    let draft = '', busy = false, release, ready;
+    const pending = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { ready = resolve; });
+    globalThis.document = { getElementById: () => ({ value: draft }) };
+    const e = events(), tools = { canPerformToolCalls: () => true, registerFunctionToolsOpenAI: async () => {}, invokeFunctionTools: async () => 'user tool' };
+    const originals = { ...tools }, requests = [];
+    const f = fixture({ photoStatus: () => ({ ready: false }), deliver: async attempt => {
+        await stageNormal({ host, tools, c: f.c, attempt, instruction: 'PRIVATE INITIATION' });
+        assert.fail('An initiation superseded by a user send must not publish');
+    } });
+    Object.assign(f.c, { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } });
+    const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' }, isGenerating: () => busy,
+        async Generate(type, options = {}) {
+            await e.emit('commands', type, options, false);
+            const event = { chat: [{ role: 'user', content: 'My actual message' }] };
+            await e.emit('prompt', event);
+            const request = { messages: event.chat, stream: f.c.chatCompletionSettings.stream_openai, tools: ['user-tool'], max_tokens: 1200 };
+            await e.emit('request', request);
+            requests.push(request); // The model boundary, after every request hook.
+            if (options.automatic_trigger) { ready(); await pending; return '{"text":"Late initiation"}'; }
+            assert.deepEqual(tools, originals);
+            return 'User reply reached the model';
+        } };
+    const task = f.engine.tick(true);
+    await started;
+    assert.ok(f.state().pending); assert.ok(f.state().attempt);
+    draft = 'My actual message'; busy = true;
+    try {
+        assert.equal(await host.Generate('normal', {}), 'User reply reached the model');
+        assert.equal(requests.length, 2);
+        assert.deepEqual(requests[1], { messages: [{ role: 'user', content: 'My actual message' }], stream: true, tools: ['user-tool'], max_tokens: 1200 });
+    } finally { release(); await task; }
+    assert.equal(f.c.chat.length, 0);
+    assert.equal(f.engine.fatal, null);
+    assert.ok([...e.handlers.values()].every(list => !list.length));
+});
+
+test('dry runs bypass the initiation entry guard; own busy check still throws and cleans up', async () => {
+    globalThis.document = { getElementById: () => ({ value: 'draft' }) };
+    const e = events(), tools = {}, c = { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } };
+    let guards = 0;
+    const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' }, isGenerating: () => true,
+        async Generate(type, options) {
+            const before = guards;
+            await assert.doesNotReject(e.emit('commands', 'normal', {}, true));
+            assert.equal(guards, before);
+            await e.emit('commands', type, options, false);
+            assert.fail('The initiation must stop for a draft/busy composer');
+        } };
+    await assert.rejects(stageNormal({ host, tools, c, attempt: { guard() { guards++; } }, instruction: 'Initiate' }), /Composer or generation became busy/);
+    assert.equal(c.chatCompletionSettings.stream_openai, true);
+    assert.ok([...e.handlers.values()].every(list => !list.length));
+    host.Generate = async () => { throw new Error('Provider unavailable'); };
+    await assert.rejects(stageNormal({ host, tools, c, attempt: { guard() {} }, instruction: 'Initiate' }), /Provider unavailable/);
+    host.Generate = async () => '{"text":"Recovered"}';
+    assert.equal(await stageNormal({ host, tools, c, attempt: { guard() {} }, instruction: 'Initiate' }), 'Recovered');
+});

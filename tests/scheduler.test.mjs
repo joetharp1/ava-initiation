@@ -204,3 +204,22 @@ test('Fire now bypasses failure backoff once; timer retries still back off', asy
     f.block(false); await f.engine.tick(); assert.equal(count, 3);
     await f.engine.tick(); assert.equal(count, 3);
 });
+
+test('five-second ticks after an unanswered send wait through the 90-second bound', async () => {
+    const f = fixture(); await f.engine.tick(true);
+    const unansweredAt = f.state().unansweredAt;
+    assert.equal(f.deliveries.length, 1);
+    for (let elapsed = 5000; elapsed < 90000; elapsed += 5000) {
+        f.advance(5000); await f.engine.tick();
+        assert.equal(f.deliveries.length, 1);
+        assert.equal(f.notices.at(-1), 'Waiting for reply.');
+        assert.equal(f.state().unansweredAt, unansweredAt);
+        assert.equal(f.state().pending, null);
+    }
+    f.advance(5000); await f.engine.tick();
+    assert.equal(f.deliveries.length, 1, 'The bound expiring is not a new delivery trigger');
+    f.advance(25 * MINUTE - 90000); await f.engine.tick();
+    assert.equal(f.deliveries.length, 2); assert.equal(f.deliveries[1].sulk, true);
+    for (let i = 0; i < 20; i++) { f.advance(5000); await f.engine.tick(); }
+    assert.equal(f.deliveries.length, 2);
+});
