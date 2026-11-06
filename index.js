@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.6 — two-file client-only extension for ST 1.19.0.
+/* Ava Initiation 0.1.7 — two-file client-only extension for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -25,38 +25,54 @@ export function validateConfig(value) {
     c.telegramEnabled = c.telegramEnabled === true;
     c.telegramChatId = String(c.telegramChatId ?? '').trim();
     if (c.telegramChatId && !/^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/.test(c.telegramChatId)) throw new Error('Enter a Telegram chat ID or @channel username.');
-    // Secrets never belong in synced extension settings or the scheduler DB.
+    // Bot token is stored separately in ST extension settings, never this scheduler DB.
     delete c.telegramToken;
     return c;
 }
 export function validTelegramToken(token) { return /^\d{1,20}:[A-Za-z0-9_-]{20,100}$/.test(token); }
-export async function sendTelegram({ token, chatId, text, preview }, { fetcher = globalThis.fetch, timeoutMs = 10000 } = {}) {
+export async function sendTelegram({ token, chatId, text, preview }, {
+    fetcher = globalThis.fetch, timeoutMs = 10000,
+    wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
     if (!validTelegramToken(token || '') || !/^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/.test(chatId || '')) throw new Error('Telegram needs a saved bot token and chat ID.');
-    // Silent delivery only mutes sound; generic mode must also omit private text.
     const body = new URLSearchParams({ chat_id: chatId,
         text: preview === 'full' ? Array.from(String(text || '[Photo]')).slice(0, 200).join('') : 'Ava',
-        disable_notification: String(preview !== 'full'),
-        link_preview_options: JSON.stringify({ is_disabled: true }) });
-    const controller = new AbortController(); let timer;
-    try {
-        const work = async () => {
-            const response = await fetcher(`https://api.telegram.org/bot${token}/sendMessage`, {
-                method: 'POST', body, signal: controller.signal, credentials: 'omit',
-                referrerPolicy: 'no-referrer', redirect: 'error',
-            });
-            if (!response.ok) throw new Error('Rejected');
-            const result = await response.json();
-            if (result?.ok !== true) throw new Error('Rejected');
-        };
-        await Promise.race([work(), new Promise((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, timeoutMs);
-        })]);
-    } catch {
-        // Fetch exceptions and provider responses may contain the token-bearing URL.
-        // Never expose them to diagnostics, chat, saved logs or model context.
-        throw new Error(controller.signal.aborted ? 'Telegram delivery timed out; unread badge retained.'
-            : 'Telegram delivery unavailable. Check the bot token, chat ID and that you started the bot; unread badge retained.');
-    } finally { clearTimeout(timer); }
+        disable_notification: 'false', link_preview_options: JSON.stringify({ is_disabled: true }) });
+    for (let attempt = 0; attempt <= 2; attempt++) {
+        const controller = new AbortController(); let timer, reply;
+        try {
+            const work = async () => {
+                const response = await fetcher(`https://api.telegram.org/bot${token}/sendMessage`, {
+                    method: 'POST', body, signal: controller.signal, credentials: 'omit',
+                    referrerPolicy: 'no-referrer', redirect: 'error',
+                });
+                const raw = await response.text(); let value;
+                try { value = JSON.parse(raw); } catch { value = null; }
+                return { status: response.status, ok: response.ok && value?.ok === true,
+                    raw, value, attempts: attempt + 1 };
+            };
+            reply = await Promise.race([work(), new Promise((_, reject) => {
+                timer = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, timeoutMs);
+            })]);
+        } catch {
+            // Unknown delivery outcome: retrying a network timeout may duplicate a
+            // successful ping. Retry only explicit API/HTTP failures below.
+            throw new Error(controller.signal.aborted ? 'Telegram delivery timed out; unread badge retained.'
+                : 'Telegram delivery unavailable (network or response failure); unread badge retained.');
+        } finally { clearTimeout(timer); }
+        if (reply.ok) return reply;
+        const code = Number(reply.value?.error_code) || reply.status;
+        const retryable = ![400, 401].includes(reply.status) && ![400, 401].includes(code)
+            && (code === 429 || code >= 500 && code <= 599);
+        const retryAfter = Number(reply.value?.parameters?.retry_after);
+        const delay = Math.max(1000 * (attempt + 1), Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0);
+        if (retryable && attempt < 2 && delay <= 10000) { await wait(delay); continue; }
+        const error = new Error(`Telegram delivery unavailable (HTTP ${reply.status}, API ${code}); unread badge retained.`);
+        // Exact API body is available ONLY to the explicit Send test UI. Ordinary
+        // diagnostics use the safe message above and never record the raw result.
+        error.responseText = reply.raw; error.status = reply.status; error.attempts = reply.attempts;
+        throw error;
+    }
 }
 export function quietAt(now, c) {
     const mins = x => Number(x.slice(0, 2)) * 60 + Number(x.slice(3));
@@ -499,12 +515,21 @@ export async function bootPage() {
     const { getContext, extension_settings } = ext;
     const profile = users.getCurrentUserHandle();
     const namespace = `${NAME}:v1:${profile}`, dataKey = `${namespace}:data`, leaseKey = `${namespace}:lease`;
-    const telegramTokenKey = `${namespace}:telegram-token`;
+    const telegramTokenKey = `${namespace}:telegram-token`; // 0.1.6 migration only
+    const telegramToken = () => String(extension_settings[NAME]?.telegramToken || '').trim();
+    const telegramConfigured = () => !!(telegramToken() && engine.snapshot().config.telegramChatId);
     const jsonRead = key => { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; };
     const initialise = () => {
         if (!localStorage.getItem(dataKey)) localStorage.setItem(dataKey, JSON.stringify(initialDatabase(extension_settings[NAME] || DEFAULTS)));
     };
     if (navigator.locks?.request) await navigator.locks.request(namespace, initialise); else initialise();
+    const legacyToken = localStorage.getItem(telegramTokenKey);
+    if (legacyToken && !telegramToken()) {
+        extension_settings[NAME] = { ...(extension_settings[NAME] || {}), telegramToken: legacyToken };
+        host.saveSettingsDebounced();
+    }
+    // Keep the legacy copy until the server-saved settings return on a later load.
+    else if (legacyToken && telegramToken()) localStorage.removeItem(telegramTokenKey);
     const bridge = () => globalThis[Symbol.for('ava.veniceBridge')];
     let notice = '', notificationRegistration = null, notificationSetup = null, adapter = null, wakeTimer = null;
     let notificationStatus = 'Notifications have not been set up. The unread badge remains available.';
@@ -526,7 +551,7 @@ export async function bootPage() {
         const tasks = [];
         if (config.telegramEnabled) tasks.push((async () => {
             try {
-                await sendTelegram({ token: localStorage.getItem(telegramTokenKey) || '',
+                await sendTelegram({ token: telegramToken(),
                     chatId: config.telegramChatId, text: message.mes, preview });
                 telegramStatus = 'Telegram notification sent. Unread badge retained.';
             } catch (error) {
@@ -536,7 +561,7 @@ export async function bootPage() {
             }
             notificationDiagnostic(telegramStatus);
         })());
-        if (config.browserNotifications) tasks.push(notifyBrowser(c, message, preview).catch(() => {
+        if (config.browserNotifications && !telegramConfigured()) tasks.push(notifyBrowser(c, message, preview).catch(() => {
             notificationStatus = 'Browser notification unavailable; unread badge retained.';
             notificationDiagnostic(notificationStatus);
         }));
@@ -545,7 +570,7 @@ export async function bootPage() {
     async function notifyBrowser(c, message, preview) {
         if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
         if (notificationSetup) await notificationSetup;
-        if (!notificationRegistration || !engine.snapshot().config.browserNotifications) return;
+        if (!notificationRegistration || !engine.snapshot().config.browserNotifications || telegramConfigured()) return;
         const worker = await waitForNotificationWorker(notificationRegistration);
         const bytes = new TextEncoder().encode(profile + ':' + chatKey(c));
         const tag = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
@@ -650,8 +675,10 @@ export async function bootPage() {
       <label><input type="checkbox" data-setting="telegramEnabled"> Telegram notifications</label>
       <label>Telegram bot token <input class="text_pole" type="password" id="ava-telegram-token" autocomplete="new-password" spellcheck="false" placeholder="Paste bot token here"></label>
       <label>Telegram chat ID <input class="text_pole" type="text" data-setting="telegramChatId" autocomplete="off" spellcheck="false" placeholder="Your Telegram chat ID"></label>
-      <p>Token stays in this browser profile. Start your bot in Telegram first. “Ava only” sends just Ava, silently; full preview sends up to 200 characters.</p>
+      <p>Token and chat ID are saved in SillyTavern extension settings. Start your bot in Telegram first. “Ava only” sends just Ava; full preview sends up to 200 characters. Both allow notification sound.</p>
+      <button type="button" class="menu_button" id="ava-telegram-test">Send test</button>
       <p id="ava-telegram-status" role="status"></p>
+      <pre class="ava-log" id="ava-telegram-result" role="status" style="overflow-wrap:anywhere"></pre>
       <label>Daily photo budget (USD) <input class="text_pole" type="number" min="0" max="100" step="0.01" data-setting="creditUsd"></label>
       <p id="ava-budget"></p><p>At most two charged photo attempts per local calendar day across all companions. Failed provider attempts count. Text continues when photos reach either cap. Equal quiet times disable quiet hours.</p>
       <button type="button" class="menu_button" id="ava-fire">Fire now</button>
@@ -659,10 +686,10 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.6 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.7 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
-    panel.querySelector('#ava-telegram-token').value = localStorage.getItem(telegramTokenKey) || '';
+    panel.querySelector('#ava-telegram-token').value = telegramToken();
     const floating = document.createElement('button'); floating.id = 'ava-unread-float'; floating.hidden = true; document.body.append(floating);
     floating.onclick = () => { panel.querySelector('.inline-drawer-toggle')?.click(); panel.scrollIntoView({ block: 'start' }); };
     function refresh() {
@@ -687,8 +714,8 @@ export async function bootPage() {
             panel.querySelector('#ava-status').textContent = notice;
             panel.querySelector('#ava-notifications').textContent = notificationStatus;
             panel.querySelector('#ava-telegram-status').textContent = !db.config.telegramEnabled
-                ? 'Telegram notifications off.' : telegramStatus || (localStorage.getItem(telegramTokenKey) && db.config.telegramChatId
-                    ? 'Telegram configured. Fire now tests delivery.' : 'Add your bot token and chat ID to use Telegram.');
+                ? 'Telegram notifications off.' : telegramStatus || (telegramToken() && db.config.telegramChatId
+                    ? 'Telegram configured. Use Send test to check delivery.' : 'Add your bot token and chat ID to use Telegram.');
             panel.querySelector('#ava-notification-log').textContent = notificationDiagnostics.join('\n');
             panel.querySelector('#ava-log').textContent = db.log.filter(r => !key || r.chat === key).slice(-25).reverse()
                 .map(r => `${r.timestamp} · ${r.type || 'slot'} · ${r.outcome}\n${r.text}`).join('\n\n');
@@ -697,7 +724,12 @@ export async function bootPage() {
     async function setupNotifications(requestPermission, enabled = engine.snapshot().config.browserNotifications) {
         // Capture the toggle synchronously, before its settings write acquires
         // the Web Lock. A previously active worker can resolve before that write.
-        browserNotificationsWanted = !!enabled;
+        browserNotificationsWanted = !!enabled && !telegramConfigured();
+        if (telegramConfigured()) {
+            notificationRegistration = null;
+            notificationStatus = 'Browser worker skipped: Telegram credentials are configured. Unread badge enabled.';
+            refresh(); return;
+        }
         if (!enabled) {
             notificationRegistration = null;
             notificationStatus = 'Browser notifications off. Unread badge enabled.';
@@ -721,6 +753,7 @@ export async function bootPage() {
                         : 'Notification permission not granted. Enable notifications to request it; unread badge enabled.';
                     refresh(); return;
                 }
+                if (!browserNotificationsWanted || telegramConfigured()) return;
                 notificationStatus = 'Notification permission granted; registering Ava worker…'; refresh();
                 const registration = await navigator.serviceWorker.register(import.meta.url, {
                     type: 'module', scope: new URL('.', import.meta.url).pathname,
@@ -729,7 +762,7 @@ export async function bootPage() {
                 notificationStatus = 'Notification permission granted; waiting for Ava worker activation…'; refresh();
                 const worker = await waitForNotificationWorker(registration);
                 // The user may switch this option off while registration settles.
-                if (!browserNotificationsWanted) return;
+                if (!browserNotificationsWanted || telegramConfigured()) return;
                 notificationRegistration = registration;
                 worker.postMessage({ kind: 'ava-client', url: location.href,
                     standalone: matchMedia('(display-mode: standalone)').matches || navigator.standalone === true });
@@ -737,7 +770,7 @@ export async function bootPage() {
                 notificationDiagnostic(`Ava worker activated: ${registration.scope}.`);
             } catch (e) {
                 notificationRegistration = null;
-                if (!browserNotificationsWanted) return;
+                if (!browserNotificationsWanted || telegramConfigured()) return;
                 notificationStatus = /\b401\b/.test(String(e.message))
                     ? 'Browser notifications unavailable: this site requires sign-in for its worker. Unread badge enabled; Telegram can be used independently.'
                     : 'Browser notifications unavailable: worker registration or activation did not complete. Unread badge enabled; Telegram can be used independently.';
@@ -755,8 +788,11 @@ export async function bootPage() {
                 refresh(); return;
             }
             try {
-                if (token) localStorage.setItem(telegramTokenKey, token); else localStorage.removeItem(telegramTokenKey);
-                telegramStatus = token ? 'Telegram token saved on this device.' : 'Telegram token removed.';
+                extension_settings[NAME] = { ...engine.snapshot().config, telegramToken: token };
+                host.saveSettingsDebounced();
+                localStorage.removeItem(telegramTokenKey);
+                telegramStatus = token ? 'Telegram token saved in extension settings.' : 'Telegram token removed.';
+                await setupNotifications(false);
             } catch { telegramStatus = 'Telegram token could not be saved on this device.'; }
             refresh(); return;
         }
@@ -773,13 +809,28 @@ export async function bootPage() {
             if (!cfg.enabled || c && !cfg.allow[c.avatar]) engine.cancel('Initiation disabled.');
             if (cfg.creditUsd < db.config.creditUsd && engine.running?.type === 'photo') engine.cancel('Photo budget lowered.');
             await engine.updateConfig(cfg);
-            extension_settings[NAME] = engine.snapshot().config; host.saveSettingsDebounced();
+            extension_settings[NAME] = { ...engine.snapshot().config, telegramToken: telegramToken() }; host.saveSettingsDebounced();
             if (cfg.preview === 'generic' && notificationRegistration) {
                 for (const notification of await notificationRegistration.getNotifications()) notification.close();
             }
-            await permissionTask; await rearm();
+            await permissionTask;
+            if (el.dataset.setting?.startsWith('telegram')) await setupNotifications(false);
+            await rearm();
         } catch (e) { notice = e.message; refresh(); }
     });
+    panel.querySelector('#ava-telegram-test').onclick = async event => {
+        const button = event.currentTarget, result = panel.querySelector('#ava-telegram-result');
+        button.disabled = true; result.textContent = 'Sending test…';
+        try {
+            const reply = await sendTelegram({ token: telegramToken(), chatId: engine.snapshot().config.telegramChatId,
+                preview: engine.snapshot().config.preview, text: 'Ava notification test.' });
+            result.textContent = reply.raw;
+            notificationDiagnostic('Telegram test delivered.');
+        } catch (error) {
+            result.textContent = error.responseText ?? error.message;
+            notificationDiagnostic('Telegram test did not deliver; see the API response beneath Send test.');
+        } finally { button.disabled = false; }
+    };
     panel.querySelector('#ava-fire').onclick = async () => { await engine.tick(true); await rearm(); };
     panel.querySelector('#ava-read').onclick = async () => { await engine.markRead(); refresh(); };
     async function rearm() {

@@ -2,14 +2,14 @@ const fs = require('node:fs'), http = require('node:http'), path = require('node
 const { chromium } = require(path.join(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES, 'playwright'));
 const root = path.resolve(__dirname, '..');
 const mocks = {
- '/scripts/extensions.js': `export const extension_settings={};export const extensionNames=[];export const getExtensionManifest=()=>null;export const getContext=()=>globalThis.fixture.c;`,
+ '/scripts/extensions.js': `export const extension_settings=globalThis.fixtureSettings=JSON.parse(localStorage.getItem('fixture-settings')||'{}');export const extensionNames=[];export const getExtensionManifest=()=>null;export const getContext=()=>globalThis.fixture.c;`,
  '/scripts/tool-calling.js': `export class ToolManager {static canPerformToolCalls(){return true}static async registerFunctionToolsOpenAI(){}static async invokeFunctionTools(){throw Error('must not execute')}}`,
  '/scripts/chats.js': `export const hasPendingFileAttachment=()=>false;`,
  '/scripts/user.js': `export const getCurrentUserHandle=()=> 'test-user';`,
  '/scripts/constants.js': `export const MEDIA_TYPE={IMAGE:'image'};`,
  '/script.js': `export const event_types={CHAT_CHANGED:'chat',MESSAGE_SENT:'sent',MESSAGE_RECEIVED:'received',CHARACTER_MESSAGE_RENDERED:'rendered',GENERATION_STOPPED:'stop',GENERATION_AFTER_COMMANDS:'commands',CHAT_COMPLETION_PROMPT_READY:'prompt',CHAT_COMPLETION_SETTINGS_READY:'request'};
  const callbacks=new Map();export const eventSource={on(k,f){callbacks.set(k,[...(callbacks.get(k)||[]),f])},makeLast(k,f){this.on(k,f)},removeListener(k,f){callbacks.set(k,(callbacks.get(k)||[]).filter(x=>x!==f))},async emit(k,...args){for(const f of [...(callbacks.get(k)||[])])await f(...args)}};
- let generating=false;export const isGenerating=()=>generating;export const saveSettingsDebounced=()=>{};
+ let generating=false;export const isGenerating=()=>generating;export const saveSettingsDebounced=()=>{localStorage.setItem('fixture-settings',JSON.stringify(globalThis.fixtureSettings))};
  export function stopGeneration(){generating=false;eventSource.emit('stop')}
  export async function Generate(type,options){
  if(type!=='normal'||!options.automatic_trigger||!options.jsonSchema)throw Error('Wrong generation path');
@@ -141,7 +141,7 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   const telegramRequests=[];let rejectTelegram=false;
   await page.route('https://api.telegram.org/**', async route=>{
    telegramRequests.push(new URLSearchParams(route.request().postData()));
-   if(rejectTelegram)await route.fulfill({status:401,contentType:'application/json',body:'{"ok":false}'});
+   if(rejectTelegram)await route.fulfill({status:401,contentType:'application/json',body:'{ "ok": false, "error_code": 401, "description": "Unauthorized" }'});
    else await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
   });
   const fakeToken='123456789:TEST_ONLY_NOT_A_REAL_TOKEN_12345';
@@ -153,14 +153,14 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   await page.locator('#ava-fire').click();
   await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('notification sent'));
   assert.equal(telegramRequests.length,1);assert.equal(telegramRequests[0].get('text'),'Ava');
-  assert.equal(telegramRequests[0].get('disable_notification'),'true');assert.equal(telegramRequests[0].get('chat_id'),'-123456789');
+  assert.equal(telegramRequests[0].get('disable_notification'),'false');assert.equal(telegramRequests[0].get('chat_id'),'-123456789');
   assert.equal(await page.locator('.message').count(),4);
   const secretCheck=await page.evaluate(async()=>({db:localStorage.getItem('ava-initiation:v1:test-user:data'),
-   token:localStorage.getItem('ava-initiation:v1:test-user:telegram-token'),
+   token:(await import('/scripts/extensions.js')).extension_settings['ava-initiation'].telegramToken,
    settings:JSON.stringify((await import('/scripts/extensions.js')).extension_settings),prompt:JSON.stringify(fixture.request),
    diagnostics:document.querySelector('#ava-notification-log').textContent}));
-  assert.equal(secretCheck.token,fakeToken);
-  for(const key of ['db','settings','prompt','diagnostics'])assert.ok(!secretCheck[key].includes(fakeToken),key+' must not contain token');
+  assert.equal(secretCheck.token,fakeToken);assert.ok(secretCheck.settings.includes(fakeToken),'token stored in ST extension settings');
+  for(const key of ['db','prompt','diagnostics'])assert.ok(!secretCheck[key].includes(fakeToken),key+' must not contain token');
   await page.locator('[data-setting=preview]').selectOption('full');await page.waitForTimeout(100);
   await page.evaluate(()=>{fixture.output=JSON.stringify({text:'A'.repeat(250)})});
   await page.locator('#ava-fire').click();
@@ -176,15 +176,40 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   const afterFailure=await page.evaluate(()=>JSON.parse(localStorage.getItem('ava-initiation:v1:test-user:data')));
   assert.equal(afterFailure.chats['["A","chat-granted"]'].state,'sent');
   await page.waitForTimeout(300);assert.equal(telegramRequests.length,3);
-  // Turning browser notifications off prevents registration even after reload.
-  await page.locator('[data-setting=browserNotifications]').uncheck();await page.waitForTimeout(100);
+  // Send test is explicit, shows the exact API response, and adds no chat turn.
+  await page.locator('#ava-telegram-test').click();
+  await page.waitForFunction(()=>!document.querySelector('#ava-telegram-test').disabled);
+  assert.equal(await page.locator('#ava-telegram-result').textContent(),'{ "ok": false, "error_code": 401, "description": "Unauthorized" }');
+  assert.equal(telegramRequests.length,4);assert.equal(await page.locator('.message').count(),6);
+  rejectTelegram=false;
+  await page.locator('#ava-telegram-test').click();
+  await page.waitForFunction(()=>!document.querySelector('#ava-telegram-test').disabled);
+  assert.equal(await page.locator('#ava-telegram-result').textContent(),'{"ok":true}');
+  assert.equal(telegramRequests.length,5);assert.equal(telegramRequests[4].get('text'),'Ava notification test.');
+  // Credentials suppress worker registration despite the browser option staying on.
+  assert.equal(await page.locator('[data-setting=browserNotifications]').isChecked(),true);
   await page.addInitScript(()=>{globalThis.registrationAttempts=0;navigator.serviceWorker.register=async()=>{registrationAttempts++;throw Error('must remain optional')}});
   await page.reload();await page.locator('#ava-fire').waitFor();
   assert.equal(await page.evaluate(()=>registrationAttempts),0);
   assert.equal(await page.locator('[data-setting=telegramChatId]').inputValue(),'-123456789');
   assert.equal(await page.locator('#ava-telegram-token').inputValue(),fakeToken);
-  assert.match(await page.locator('#ava-notifications').innerText(),/notifications off/);
+  assert.match(await page.locator('#ava-notifications').innerText(),/worker skipped/);
+  // Existing 0.1.6 tokens migrate to ST settings, then their legacy copy is removed.
+  await page.evaluate(token=>{
+   const settings=JSON.parse(localStorage.getItem('fixture-settings'));
+   delete settings['ava-initiation'].telegramToken;
+   localStorage.setItem('fixture-settings',JSON.stringify(settings));
+   localStorage.setItem('ava-initiation:v1:test-user:telegram-token',token);
+  },fakeToken);
+  await page.reload();await page.locator('#ava-fire').waitFor();
+  assert.equal(await page.locator('#ava-telegram-token').inputValue(),fakeToken);
+  assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('fixture-settings'))['ava-initiation'].telegramToken),fakeToken);
+  assert.equal(await page.evaluate(()=>registrationAttempts),0);
+  await page.reload();await page.locator('#ava-fire').waitFor();
+  assert.equal(await page.evaluate(()=>localStorage.getItem('ava-initiation:v1:test-user:telegram-token')),null);
+  assert.equal(await page.locator('#ava-telegram-token').inputValue(),fakeToken);
+
   assert.equal(errors.length,0,errors.join('\n'));
-  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; optional worker 401; Telegram full/generic delivery, 200-character cap, local token isolation, failed notification badge, no retry and reload persistence.');
+  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; optional worker 401; Telegram full/generic delivery, 200-character cap, extension-settings token isolation, failed notification badge, no retry reload persistence, explicit Send test and exact API errors.');
  }finally{await browser.close();server.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});
