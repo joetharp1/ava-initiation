@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { stageNormal, installWorker } from '../index.js';
+import { stageNormal, installWorker, waitForNotificationWorker, observeServiceWorkerReady } from '../index.js';
 function events() {
     const handlers = new Map(); return { makeLast: (name, fn) => handlers.set(name, [...(handlers.get(name) || []).filter(x => x !== fn), fn]),
         removeListener: (name, fn) => handlers.set(name, handlers.get(name).filter(x => x !== fn)),
@@ -138,4 +138,63 @@ test('notification click prefers a registered PWA over the originating browser t
 
 test('unsupported generation backend is rejected before it can stream visibly', async () => {
     await assert.rejects(stageNormal({ c: { mainApi: 'textgenerationwebui' }, host: { Generate: () => assert.fail() } }), /Chat Completion/);
+});
+
+for (const [type, sulk, limit] of [['photo', false, 800], ['one-liner', false, 700], ['question', true, 400]]) {
+    test(`reasoning budget: ${type}, sulk=${sulk} gets ${limit} tokens`, async () => {
+        const e = events(), c = { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } };
+        const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'a', CHAT_COMPLETION_PROMPT_READY: 'b', CHAT_COMPLETION_SETTINGS_READY: 'c' },
+            Generate: async () => {
+                const req = { max_tokens: 5, max_completion_tokens: 5 }; await e.emit('c', req);
+                assert.equal(req.max_tokens, limit); assert.equal(req.max_completion_tokens, limit);
+                return '{"text":"A short opening"}';
+            } };
+        assert.equal(await stageNormal({ host, tools: {}, c, attempt: { guard() {}, type, sulk }, instruction: 'Initiate' }), 'A short opening');
+    });
+}
+test('parse failure reports serialized raw output, bounded to 1000 characters', async () => {
+    const e = events(), c = { mainApi: 'openai', chatCompletionSettings: {} };
+    const output = '{"reasoning":"' + 'x'.repeat(2000);
+    const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'a', CHAT_COMPLETION_PROMPT_READY: 'b', CHAT_COMPLETION_SETTINGS_READY: 'c' }, Generate: async () => output };
+    await assert.rejects(stageNormal({ host, tools: {}, c, attempt: { guard() {} }, instruction: '' }), error => {
+        assert.ok(error.message.includes('Raw output: ' + JSON.stringify(output).slice(0, 1000)));
+        assert.ok(error.message.endsWith('… [truncated]')); assert.ok(error.message.length < 1100); return true;
+    });
+    host.Generate = async () => ({ text: 123, diagnostic: 'provider did not return text' });
+    await assert.rejects(stageNormal({ host, tools: {}, c, attempt: { guard() {} }, instruction: '' }), /Raw output:.*provider did not return text/);
+});
+function activationFixture() {
+    const worker = new EventTarget(); worker.state = 'installing';
+    const registration = new EventTarget(); Object.assign(registration, { active: null, installing: worker, waiting: null });
+    let timeout, cleared = 0;
+    const options = { setTimer: fn => { timeout = fn; return 1; }, clearTimer: () => { cleared++; } };
+    return { worker, registration, options, expire: () => timeout(), cleared: () => cleared };
+}
+test('notification activation waits for this registration, not merely active=activating', async () => {
+    const f = activationFixture(); let resolved = false;
+    const pending = waitForNotificationWorker(f.registration, f.options).then(w => { resolved = true; return w; });
+    f.worker.state = 'activating'; f.registration.active = f.worker;
+    f.worker.dispatchEvent(new Event('statechange')); await Promise.resolve(); assert.equal(resolved, false);
+    f.worker.state = 'activated'; f.registration.installing = null;
+    f.worker.dispatchEvent(new Event('statechange')); assert.equal(await pending, f.worker); assert.equal(f.cleared(), 1);
+});
+test('notification activation rejects redundant workers and bounded timeout', async () => {
+    const f = activationFixture(); const p = waitForNotificationWorker(f.registration, f.options);
+    f.worker.state = 'redundant'; f.worker.dispatchEvent(new Event('statechange'));
+    await assert.rejects(p, /redundant/); assert.equal(f.cleared(), 1);
+    const g = activationFixture(); const q = waitForNotificationWorker(g.registration, g.options);
+    g.expire(); await assert.rejects(q, /timed out/); assert.equal(g.cleared(), 1);
+});
+test('page ready diagnostics log pending and late resolution without gating own worker', async () => {
+    const messages = []; let expire, resolveReady;
+    observeServiceWorkerReady({ ready: new Promise(r => { resolveReady = r; }) }, x => messages.push(x), {
+        setTimer: fn => { expire = fn; return 1; }, clearTimer() {} });
+    expire(); assert.ok(messages.some(x => x.includes('still pending')));
+    resolveReady({ scope: '/other-pwa/' }); await Promise.resolve();
+    assert.ok(messages.some(x => x.includes('resolved (/other-pwa/)')));
+});
+test('page ready rejection diagnostic is observed without unhandled rejection', async () => {
+    const messages = [];
+    observeServiceWorkerReady({ ready: Promise.reject(new Error('test failure')) }, x => messages.push(x), { setTimer: () => 1, clearTimer() {} });
+    await Promise.resolve(); assert.ok(messages.some(x => x.includes('rejected (test failure)')));
 });

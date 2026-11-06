@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.3 — two-file client-only extension for ST 1.19.0.
+/* Ava Initiation 0.1.4 — two-file client-only extension for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -167,7 +167,7 @@ export function createEngine(d) {
             save(db);
             const p = s.pending;
             if (!p) { report(s.unansweredAt == null ? 'Waiting for the next interval.' : 'Sent. Waiting for a reply.'); return; }
-            if (s.retryAt > t) { report('Waiting for failure backoff.'); return; }
+            if (!p.manual && s.retryAt > t) { report('Waiting for failure backoff.'); return; }
             if (!p.manual && quietAt(t, db.config)) { report('Quiet hours: missed slots will be coalesced on wake.'); return; }
             if (d.blocked()) {
                 p.deferAt ??= t;
@@ -192,7 +192,8 @@ export function createEngine(d) {
             const choices = TYPES.filter(x => x !== s.lastType && (x !== 'photo' || canPhoto));
             const type = choices[Math.min(choices.length - 1, Math.floor(d.random() * choices.length))];
             const a = { id: d.uuid(), type, sulk: p.sulk, startedAt: t, deadline: t + DEADLINE, delivered: false };
-            s.attempt = a; save(db);
+            // Consume one manual retry; a failure must return to automatic backoff.
+            p.manual = false; s.attempt = a; save(db);
             const ownLease = { owner, attemptId: a.id, timestamp: t, expiresAt: a.deadline + 30000 };
             d.writeLease(ownLease);
             let cancelled = false, timer, rejectCancel, delivered = null;
@@ -389,7 +390,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction }) {
             try { prior = JSON.parse(data.custom_include_body || '{}') || {}; } catch { prior = {}; }
             data.custom_include_body = JSON.stringify({ ...prior, venice_parameters: { ...(prior.venice_parameters || {}),
                 include_venice_system_prompt: false, enable_web_search: 'off', enable_web_scraping: false } });
-            data.max_tokens = attempt.type === 'photo' ? 300 : attempt.sulk ? 100 : 220;
+            data.max_tokens = attempt.type === 'photo' ? 800 : attempt.sulk ? 400 : 700;
             if (data.max_completion_tokens != null) data.max_completion_tokens = data.max_tokens;
             data.venice_parameters = { ...(data.venice_parameters || {}), enable_web_search: 'off', enable_web_scraping: false };
         });
@@ -397,7 +398,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction }) {
         const result = await host.Generate('normal', { automatic_trigger: true, jsonSchema: SCHEMA });
         check();
         const raw = typeof result === 'string' || result instanceof String ? String(result) : (result?.text ?? '');
-        const stripped = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        const stripped = (typeof raw === 'string' ? raw : '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
         let text = '';
         try {
             const value = JSON.parse(stripped);
@@ -405,13 +406,53 @@ export async function stageNormal({ host, tools, c, attempt, instruction }) {
         } catch {
             if (stripped && !/^[{[]/.test(stripped)) text = stripped;
         }
-        if (!text) throw new Error('Model returned no usable initiation.');
+        if (!text) {
+            let diagnostic;
+            try { diagnostic = JSON.stringify(result) ?? String(result); }
+            catch { diagnostic = '[Unserializable model output]'; }
+            throw new Error(`Model returned no usable initiation. Raw output: ${diagnostic.slice(0, 1000)}${diagnostic.length > 1000 ? '… [truncated]' : ''}`);
+        }
         if (text.length > (attempt.type === 'photo' ? 1500 : 2000)) throw new Error('Initiation exceeded its output limit.');
         return text;
     } finally {
         for (const undo of undos.reverse()) undo();
         if (settings.stream_openai === false) settings.stream_openai = streamBefore;
     }
+}
+
+// Wait on this narrow-scope registration, not the page's unrelated PWA worker.
+export function waitForNotificationWorker(registration, { timeoutMs = 15000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+    return new Promise((resolve, reject) => {
+        const watched = new Set(); let done = false, timer;
+        const finish = (error, worker) => {
+            if (done) return; done = true;
+            clearTimer(timer);
+            registration.removeEventListener('updatefound', check);
+            for (const w of watched) w.removeEventListener('statechange', check);
+            error ? reject(error) : resolve(worker);
+        };
+        const check = () => {
+            if (done) return;
+            if (registration.active?.state === 'activated') return finish(null, registration.active);
+            for (const w of [registration.active, registration.installing, registration.waiting].filter(Boolean)) {
+                if (!watched.has(w)) { watched.add(w); w.addEventListener('statechange', check); }
+            }
+            if (watched.size && [...watched].every(w => w.state === 'redundant')) finish(new Error('Ava notification worker became redundant before activation.'));
+        };
+        registration.addEventListener('updatefound', check);
+        timer = setTimer(() => finish(new Error('Ava notification worker activation timed out after 15 seconds.')), timeoutMs);
+        check();
+    });
+}
+
+export function observeServiceWorkerReady(container, report, { timeoutMs = 10000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+    report('navigator.serviceWorker.ready: observing page registration (diagnostic only).');
+    const timer = setTimer(() => report('navigator.serviceWorker.ready: still pending. Ava uses its own directory scope; this does not prove its worker failed.'), timeoutMs);
+    try {
+        Promise.resolve(container.ready).then(registration => {
+            clearTimer(timer); report(`navigator.serviceWorker.ready: resolved (${registration.scope}).`);
+        }, error => { clearTimer(timer); report(`navigator.serviceWorker.ready: rejected (${error.message || error}).`); });
+    } catch (error) { clearTimer(timer); report(`navigator.serviceWorker.ready: rejected (${error.message || error}).`); }
 }
 
 export async function bootPage() {
@@ -428,15 +469,24 @@ export async function bootPage() {
     };
     if (navigator.locks?.request) await navigator.locks.request(namespace, initialise); else initialise();
     const bridge = () => globalThis[Symbol.for('ava.veniceBridge')];
-    let notice = '', notificationRegistration = null, adapter = null, wakeTimer = null;
+    let notice = '', notificationRegistration = null, notificationSetup = null, adapter = null, wakeTimer = null;
+    let notificationStatus = 'Notifications have not been set up. The unread badge remains available.';
+    const notificationDiagnostics = [];
+    function notificationDiagnostic(text) {
+        notificationDiagnostics.push(`${Date.now()} · ${text}`);
+        if (notificationDiagnostics.length > 40) notificationDiagnostics.shift();
+        console.info('[Ava notifications]', text);
+        refresh();
+    }
     function active() {
         const c = getContext(), avatar = c.characters?.[c.characterId]?.avatar;
         return avatar && c.chatId && !c.groupId ? { ...c, avatar, group: c.groupId } : null;
     }
     async function notify(c, message, preview) {
-        if (!notificationRegistration || Notification.permission !== 'granted') return;
-        const worker = notificationRegistration.active;
-        if (!worker) throw new Error('Notification worker is not active yet.');
+        if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+        if (notificationSetup) await notificationSetup;
+        if (!notificationRegistration) throw new Error(notificationStatus);
+        const worker = await waitForNotificationWorker(notificationRegistration);
         const bytes = new TextEncoder().encode(profile + ':' + chatKey(c));
         const tag = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
         const url = new URL(location.href); url.hash = '';
@@ -447,6 +497,9 @@ export async function bootPage() {
             worker.postMessage({ kind: 'ava-notify', url: url.href, key: chatKey(c), tag, preview,
                 standalone: matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
                 text: message.mes || '[Photo]' }, [channel.port2]);
+        }).then(() => notificationDiagnostic('showNotification completed.'), error => {
+            notificationStatus = `Notification display failed: ${error.message}. Unread badge retained.`;
+            notificationDiagnostic(notificationStatus); throw error;
         });
     }
     const engine = createEngine({
@@ -536,8 +589,9 @@ export async function bootPage() {
       <button type="button" class="menu_button" id="ava-fire">Fire now</button>
       <button type="button" class="menu_button" id="ava-read">Mark initiations read</button>
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
+      <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.3 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.4 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     const floating = document.createElement('button'); floating.id = 'ava-unread-float'; floating.hidden = true; document.body.append(floating);
@@ -562,28 +616,50 @@ export async function bootPage() {
                     ? ' Photos paused: refresh the editing catalogue to obtain a price.' : '';
             panel.querySelector('#ava-budget').textContent = `Today: ${b.attempts}/2 photo attempts; $${(b.spent / 1e6).toFixed(2)} reserved of $${db.config.creditUsd.toFixed(2)}.${photoNote}`;
             panel.querySelector('#ava-status').textContent = notice;
-            panel.querySelector('#ava-notifications').textContent = typeof Notification !== 'undefined' && Notification.permission === 'granted' && notificationRegistration?.active
-                ? 'PWA notifications ready. An unread badge is also kept.' : 'Notifications unavailable or not allowed. The unread badge remains visible in the app.';
+            panel.querySelector('#ava-notifications').textContent = notificationStatus;
+            panel.querySelector('#ava-notification-log').textContent = notificationDiagnostics.join('\n');
             panel.querySelector('#ava-log').textContent = db.log.filter(r => !key || r.chat === key).slice(-25).reverse()
                 .map(r => `${r.timestamp} · ${r.type || 'slot'} · ${r.outcome}\n${r.text}`).join('\n\n');
         } catch (e) { panel.querySelector('#ava-status').textContent = `Paused: ${e.message}`; }
     }
     async function setupNotifications(requestPermission) {
-        if (!('serviceWorker' in navigator) || typeof Notification === 'undefined') { refresh(); return; }
-        try {
-            // Must run directly from the enable-toggle gesture, before async work.
-            const permission = requestPermission && Notification.permission === 'default'
-                ? await Notification.requestPermission() : Notification.permission;
-            if (permission !== 'granted') { refresh(); return; }
-            notificationRegistration = await navigator.serviceWorker.register(import.meta.url, {
-                type: 'module', scope: new URL('.', import.meta.url).pathname,
-            });
-            const announce = () => notificationRegistration.active?.postMessage({ kind: 'ava-client', url: location.href,
-                standalone: matchMedia('(display-mode: standalone)').matches || navigator.standalone === true });
-            announce();
-            notificationRegistration.installing?.addEventListener('statechange', announce);
-            refresh();
-        } catch (e) { notice = `Notifications unavailable: ${e.message}. Unread badge enabled.`; refresh(); }
+        if (!('serviceWorker' in navigator) || typeof Notification === 'undefined') {
+            notificationStatus = 'Notifications unsupported in this browser. Unread badge enabled.';
+            notificationDiagnostic(notificationStatus); return;
+        }
+        if (requestPermission) observeServiceWorkerReady(navigator.serviceWorker, notificationDiagnostic);
+        if (notificationSetup) return notificationSetup;
+        notificationSetup = (async () => {
+            try {
+                // Request directly from the enable-toggle gesture, before async work.
+                const permission = requestPermission && Notification.permission === 'default'
+                    ? await Notification.requestPermission() : Notification.permission;
+                notificationDiagnostic(`Notification permission: ${permission}.`);
+                if (permission !== 'granted') {
+                    notificationStatus = permission === 'denied'
+                        ? 'Notification permission denied. Unread badge enabled.'
+                        : 'Notification permission not granted. Enable notifications to request it; unread badge enabled.';
+                    refresh(); return;
+                }
+                notificationStatus = 'Notification permission granted; registering Ava worker…'; refresh();
+                const registration = await navigator.serviceWorker.register(import.meta.url, {
+                    type: 'module', scope: new URL('.', import.meta.url).pathname,
+                });
+                notificationDiagnostic(`Registration resolved: ${registration.scope}; active=${registration.active?.state || 'none'}, installing=${registration.installing?.state || 'none'}, waiting=${registration.waiting?.state || 'none'}.`);
+                notificationStatus = 'Notification permission granted; waiting for Ava worker activation…'; refresh();
+                const worker = await waitForNotificationWorker(registration);
+                notificationRegistration = registration;
+                worker.postMessage({ kind: 'ava-client', url: location.href,
+                    standalone: matchMedia('(display-mode: standalone)').matches || navigator.standalone === true });
+                notificationStatus = 'Ava notification worker active. An unread badge is also kept.';
+                notificationDiagnostic(`Ava worker activated: ${registration.scope}.`);
+            } catch (e) {
+                notificationRegistration = null;
+                notificationStatus = `Notification setup failed: ${e.message}. Unread badge enabled.`;
+                notificationDiagnostic(notificationStatus);
+            }
+        })();
+        try { await notificationSetup; } finally { notificationSetup = null; refresh(); }
     }
     panel.addEventListener('change', async event => {
         const el = event.target;

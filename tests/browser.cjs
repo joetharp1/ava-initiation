@@ -17,7 +17,7 @@ const mocks = {
  try{const ev={chat:[{role:'system',content:'STATE TRACKER fixture: established relationship'}]};await eventSource.emit('prompt',ev);const req={messages:ev.chat,stream:fixture.c.chatCompletionSettings.stream_openai};await eventSource.emit('request',req);fixture.request=req;
  if(req.stream||req.tools)throw Error('Streaming/tools were not suppressed');
  if(fixture.hang)await new Promise(r=>fixture.release=r);
- return JSON.stringify({text:'A small hello from the character.'});}finally{generating=false}}
+ return fixture.output ?? JSON.stringify({text:'A small hello from the character.'});}finally{generating=false}}
  globalThis.fixture={calls:0,hang:false,c:{avatar:'A',characterId:0,characters:[{avatar:'A'}],chatId:'chat-a',name2:'Test Companion',chat:[],mainApi:'openai',chatCompletionSettings:{stream_openai:true,function_calling:true,prompts:[]},getCharacterCardFields:()=>({description:'A fictional adult companion.'}),substituteParams:x=>x,getTokenCountAsync:async x=>Math.ceil(x.length/3),addOneMessage(m){const p=document.createElement('p');p.className='message';p.textContent=m.mes;document.getElementById('chat').append(p)},saveChat:async()=>{}}};
  globalThis.host={eventSource,event_types};`,
 };
@@ -46,6 +46,8 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('STATE TRACKER fixture'))),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('do not continue or answer'))),true);
   assert.equal(await page.locator('#ava-unread-float').isVisible(),true);
+  assert.match(await page.locator('#ava-notifications').innerText(),/permission denied/i);
+  assert.match(await page.locator('#ava-notification-log').textContent(),/Notification permission: denied/);
   await page.waitForTimeout(300);assert.equal(await page.locator('.message').count(),1);
   // A draft must survive Fire now unchanged.
   await page.locator('#send_textarea').fill('An unfinished thought');await page.locator('#ava-fire').click();
@@ -81,6 +83,9 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   await page.locator('[data-setting=enabled]').check();
   const worker=await workerStarted;
   await page.waitForFunction(async()=> (await navigator.serviceWorker.getRegistrations()).some(r=>r.active));
+  await page.waitForFunction(()=>document.querySelector('#ava-notifications').textContent.includes('worker active'));
+  assert.match(await page.locator('#ava-notification-log').textContent(),/Registration resolved/);
+  assert.match(await page.locator('#ava-notification-log').textContent(),/Ava worker activated/);
   assert.equal(await page.evaluate(()=>permissionRequests),1);
   assert.equal(await page.evaluate(()=>Notification.permission),'granted');
   await worker.evaluate(()=>{
@@ -107,7 +112,28 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(await page.evaluate(()=>fixture.c.chat.filter(m=>m.is_user).length),0);
   const regs=await page.evaluate(async()=>({controller:navigator.serviceWorker.controller?.scriptURL??null,registrations:(await navigator.serviceWorker.getRegistrations()).map(r=>({scope:r.scope,script:r.active?.scriptURL}))}));
   assert.equal(regs.controller,null);assert.ok(regs.registrations[0].scope.endsWith('/scripts/extensions/third-party/ava-initiation/'));
+  // A bad provider result is visible in the saved log; Fire now retries now.
+  await page.waitForTimeout(200);
+  await page.evaluate(()=>{fixture.output='{"text":""}'});
+  await page.locator('#ava-fire').click();
+  await page.waitForFunction(()=>document.querySelector('#ava-log').textContent.includes('Raw output:'));
+  assert.equal(await page.locator('.message').count(),2);
+  const failed=await page.evaluate(()=>JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.endsWith(':data')))));
+  assert.ok(failed.log.some(r=>r.outcome==='failed' && r.text.includes('Raw output:')));
+  assert.ok(failed.chats['["A","chat-granted"]'].retryAt>Date.now());
+  await page.evaluate(()=>{fixture.output='{"text":"Manual retry succeeded"}'});
+  await page.locator('#ava-fire').click();
+  await page.waitForFunction(()=>document.querySelectorAll('.message').length===3);
+  assert.equal(await page.locator('.message').last().innerText(),'Manual retry succeeded');
+  await page.waitForTimeout(200);
+  // Registration failures must be distinguishable from permission denial.
+  await page.locator('[data-setting=enabled]').uncheck();await page.waitForTimeout(200);
+  await page.evaluate(()=>{navigator.serviceWorker.register=async()=>{throw Error('Injected registration failure')}});
+  await page.locator('[data-setting=enabled]').check();
+  await page.waitForFunction(()=>document.querySelector('#ava-notifications').textContent.includes('Injected registration failure'));
+  assert.equal(await page.evaluate(()=>Notification.permission),'granted');
+  assert.match(await page.locator('#ava-notification-log').textContent(),/setup failed.*Injected registration failure/);
   assert.equal(errors.length,0,errors.join('\n'));
-  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker.');
+  console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; registration failure distinguished from denied permission.');
  }finally{await browser.close();server.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -77,7 +77,7 @@ test('provider failure keeps reservation, backoff, no photo retry for same slot'
     let count = 0;
     const f = fixture({ deliver: async a => { if (a.type === 'photo') a.reservePhoto(.06); count++; throw new Error('provider failed'); } });
     await f.engine.tick(true); assert.equal(f.db.budget.attempts, 1); assert.equal(f.state().state, 'waiting');
-    await f.engine.tick(true); assert.equal(count, 1);
+    await f.engine.tick(); assert.equal(count, 1);
     f.advance(MINUTE); await f.engine.tick(); assert.equal(count, 2); assert.equal(f.db.budget.attempts, 1);
     assert.equal(f.state().retryAt - f.d.now(), 2 * MINUTE);
     for (let i = 0; i < 8; i++) { f.advance(30 * MINUTE); await f.engine.tick(); }
@@ -224,4 +224,17 @@ test('clock rollback cannot reset the daily photo cap', async () => {
     const f = fixture(); await f.engine.tick(true); await f.engine.tick(true); await f.engine.tick(true);
     assert.equal(f.db.budget.attempts, 2); f.setTime(f.db.budget.start - MINUTE);
     f.switch(); await f.engine.tick(true); assert.notEqual(f.deliveries.at(-1).type, 'photo'); assert.equal(f.db.budget.attempts, 2);
+});
+
+test('Fire now bypasses failure backoff once; timer retries still back off', async () => {
+    let count = 0;
+    const f = fixture({ deliver: async () => { count++; throw new Error('empty output'); } });
+    await f.engine.tick(true); assert.equal(count, 1);
+    assert.ok(f.state().retryAt > f.d.now());
+    await f.engine.tick(); assert.equal(count, 1);
+    await f.engine.tick(true); assert.equal(count, 2);
+    await f.engine.tick(); assert.equal(count, 2);
+    f.block(true); await f.engine.tick(true); assert.equal(count, 2);
+    f.block(false); await f.engine.tick(); assert.equal(count, 3);
+    await f.engine.tick(); assert.equal(count, 3);
 });
