@@ -1,13 +1,29 @@
-# Ava Initiation 0.1.7
+# Ava Initiation 0.1.8 — diagnostic hold
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Diagnostic run (0.1.8)
+
+**This is a diagnostic-only release. Ordinary timers and Fire now are held. The prompt role, wording and temperature have NOT been fixed yet.** The user requested two logged attempts before any behavioural change.
+
+1. Update this extension and reload SillyTavern. Select Ava's original chat and leave the composer empty. Enable initiations and Allow Ava must still be on for the diagnostic to run.
+2. Press **Run two diagnostic attempts** once. It performs at most two text-only attempts, then remains held. Drafts and competing generation still defer. A failed attempt consumes its slot; deferral before generation does not. No image credit is used.
+3. Press **Copy diagnostic report** and send the report for review. Do not add more tests while reviewing. The quota and report survive reloads and apply across tabs in the same browser profile. No reset/resume button is provided in this diagnostic build.
+
+Each capture occurs at the actual browser `fetch` POST to `/api/backends/chat-completions/generate`, after request-settings listeners have run. The report contains every message's role and first 120 text characters, the instruction's presence/indices/role, final role, configured/default continue or impersonation nudge text matches and their position relative to the instruction, temperature/custom override flags, and assistant prefill. Images and full request payloads are not copied. An earlier prompt-assembly snapshot shows whether matching nudge text appeared later. Nudge text matching alone does not prove which extension authored it. This boundary is the browser-to-ST request, not the later ST-to-provider request.
+
+The two attempts also record recent-history entry counts and the returned text's first 120 characters plus SHA-256, allowing exact output equality to be checked. Diagnostic context excerpts stay in localStorage and the console until explicitly copied; they are not sent via Telegram, placed in the model prompt or published to GitHub.
+
+Source inspection of the verified stock 1.19.0 `openai.js` shows its continue nudge is conditional on `type === 'continue'`; Ava calls `Generate('normal', ...)`. Thus the proposed late-nudge cause is **not confirmed** from source inspection. Synthetic tests cover both absent and late nudges. Only the two live reports can establish this install's final ordering.
+
+The normal behaviour below describes the engine outside this temporary diagnostic hold.
 
 ## Install
 
 1. Update **Venice Image Bridge** to **0.5.0** using SillyTavern's extension Update button (needed for photos).
 2. In **Extensions → Install extension**, paste `https://github.com/joetharp1/ava-initiation` and install.
 3. Reload SillyTavern. Open the character's chat, then **Extensions → Ava Initiation**.
-4. Allow the selected character, then enable Ava. Set intervals and quiet hours. **Fire now** runs a manual test.
+4. Allow the selected character, then enable Ava. Set intervals and quiet hours. **Run two diagnostic attempts** is the only generation action in this diagnostic release.
 
 Ava starts disabled, and each character must be allowed separately. Only the currently selected one-to-one chat is scheduled. Existing Venice keys, reference portraits and image settings are reused.
 
@@ -63,13 +79,13 @@ When both token and chat ID are present, worker setup is skipped entirely, even 
 
 Preset body parameters are merged, delivery reconciliation is guarded, fenced JSON/plain-prose fallback is supported, and the granted-permission notification path is covered. ST's `jsonSchema.returnInvalid` is enabled so fallback receives the provider's original text. Version 0.1.3 adds only scoped field styling and standard SillyTavern input classes so number/time values remain readable on mobile. Scheduling and generation logic are unchanged.
 
-SHA-256 `index.js`: `cff435345cf3b39da4ec759d7758de353f83e7ee062c2948367e4066b15fc766`.
+SHA-256 `index.js`: `7717e9e0e09f2bb63e926c3c7495f5c688587ebc1372bd57c32f63d01ff1cca9`.
 
 ## Validation
 
-The combined suite passes 124 Node checks, including manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. This repository carries the scheduler/adapter/worker tests; bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
+The combined suite passes 132 Node checks, including manual retry/backoff, raw-output bounds, reasoning budgets, worker activation/failure and ready diagnostics. This repository carries the scheduler/adapter/worker tests; bridge tests are in the bridge repository. Run `npm test` with Node 22+. Set `ST_SCRIPT` to a verified ST 1.19.0 `public/script.js` to run the source-contract check; otherwise it explicitly skips.
 
-The development-only Playwright browser harness checks mobile layouts, drafts, denied-permission badges and page-to-worker notification delivery, plus protected-worker 401 handling, Telegram generic/full previews, truncation, token isolation/migration, reload persistence, bounded retries, explicit test responses and failed-delivery fallback. Telegram requests are intercepted with fake credentials; no real Telegram messages are sent. It uses a controlled permission grant and a `showNotification` spy on the real module worker. Native Android notification display/click and real provider output need live smoke checks. No paid requests were used in automated testing. Playwright is not an extension dependency.
+The current development-only Playwright harness checks the actual page fetch boundary with two synthetic responses, captures a deliberately late nudge, verifies unchanged role/temperature and history injection, detects identical outputs, restores fetch/settings, and enforces the two-attempt hold across reloads and tabs. It also checks draft protection, text-only selection, report copying and mobile widths of 320/393/709/1024 pixels. These fixtures are not evidence of live installation behaviour. Version 0.1.7 previously passed the Telegram/notification browser harness; Telegram retry/error and worker behaviour remain covered by Node tests. No paid provider calls were used. Playwright is not an extension dependency.
 
 ## Deferred follow-ups
 
