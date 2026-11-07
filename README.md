@@ -1,6 +1,18 @@
-# Ava Initiation 0.1.11
+# Ava Initiation 0.1.12
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Text-first photos and network recovery (0.1.12)
+
+Photo initiations now generate and save a short spoken line before generating the scene and requesting the image. An image failure leaves the line in chat, logs a `failed` photo with the available raw error, and preserves the partial-failure status. A successful line/photo pair shares one attempt ID, unread increment and notification. The sent record retains both the text message ID and image URL/message ID. The private scene-generation output is never posted to chat.
+
+The final assistant text is excluded from recent-initiation history and removed from the assembled initiation prompt when matched (without modifying the saved chat or removing tool-call messages). Joe/Danny's exact repetition instruction quotes the previous message as reference data. Exact repeated output is rejected before publication. System-role placement and inherited temperature remain unchanged.
+
+Photos selected while the app is hidden remain pending with “Held, app backgrounded”; text may still run. Returning to the app resumes the pending photo. If the app backgrounds after the line has already landed, a not-yet-started image is stopped and the partial failure is reported.
+
+A TypeError containing “Failed to fetch” gets one retry after one second, shared across the attempt's generation/image stages. Logs show error name and `network`; provider/local errors do not receive this retry. Retries recheck chat/draft/deadline and cannot republish an already-published image. Each potentially billed image request still checks the existing count/credit caps. The local reservation is released on failure if no message was delivered, including expired interrupted attempts recovered after reload. A reservation release is not a refund from Venice. If the line landed, the reservation remains.
+
+Validation: 98 Node tests with the ST 1.19 source-contract test enabled. New cases cover line-before-photo ordering, partial failures, exact-duplicate rejection, prompt-only filtering, background hold/resume, one network retry, cancellation, reservation release/reload and credit caps. The browser harness has matching adapter cases; it could not run in this environment because Chromium startup was blocked. No paid model calls or live chat changes were made during testing. Update Ava Initiation only; the bridge interface remains compatible with 0.6.5.
 
 ## Consume generation entry once (0.1.11)
 
@@ -36,10 +48,10 @@ Ava starts disabled, and each character must be allowed separately. Only the cur
 ## Behaviour
 
 - Random types: photo, question, complaint, demand, one-liner; no consecutive repeated type.
-- One visible text message, or one caption-free reference photo. No visible user turn or automatic continuation.
+- One visible text message; photo initiations deliver a short line followed by a caption-free reference photo. No visible user turn or automatic continuation.
 - After an unanswered initiation, one shorter, sharper text can follow at 25 minutes; then wait for a reply.
 - Quiet hours, overnight wake coalescing, draft/busy deferral and per-chat state. Fire now bypasses quiet hours, failure backoff and the unanswered wait, but respects drafts, competing generation and budgets.
-- Photos: at most two charged attempts per local day across allowlisted characters in this browser profile; default daily cap $0.12. Reservations use the greater of $0.06 and the selected model's catalogue price. Ambiguous failures remain charged against this local budget. Text continues when photos reach either cap.
+- Photos: at most two charged attempts per local day across allowlisted characters in this browser profile; default daily cap $0.12. Reservations use the greater of $0.06 and the selected model's catalogue price. Failures with no delivered message release the local reservation; partial delivery retains it. Potentially billed retries obey the same caps. Text continues when photos reach either cap.
 - Web Locks plus an expiring localStorage lease prevent duplicate attempts across windows. Unsupported Web Locks pause initiation with a visible reason.
 - 150-second attempt deadline and bounded backoff. Log retains 200 records; context history is token-capped.
 - Normal ST-owned context, including World Info/state trackers. Model-invoked tools are suppressed for initiations; the saved function-calling setting stays unchanged.

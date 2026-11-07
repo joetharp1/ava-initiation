@@ -39,12 +39,12 @@ test('budget uses higher catalogue price and rejects unknown costs', async () =>
     await f.engine.tick(true); assert.notEqual(f.deliveries[0].type, 'photo');
     assert.equal(photoCostMicros(null), null); assert.equal(photoCostMicros(.03), 60000);
 });
-test('provider failure keeps reservation, backoff, no photo retry for same slot', async () => {
+test('provider failure without delivery releases reservation, keeps backoff and text fallback', async () => {
     let count = 0;
     const f = fixture({ deliver: async a => { if (a.type === 'photo') a.reservePhoto(.06); count++; throw new Error('provider failed'); } });
-    await f.engine.tick(true); assert.equal(f.db.budget.attempts, 1); assert.equal(f.state().state, 'waiting');
+    await f.engine.tick(true); assert.equal(f.db.budget.attempts, 0); assert.equal(f.state().state, 'waiting');
     await f.engine.tick(); assert.equal(count, 1);
-    f.advance(MINUTE); await f.engine.tick(); assert.equal(count, 2); assert.equal(f.db.budget.attempts, 1);
+    f.advance(MINUTE); await f.engine.tick(); assert.equal(count, 2); assert.equal(f.db.budget.attempts, 0);
     assert.equal(f.state().retryAt - f.d.now(), 2 * MINUTE);
     for (let i = 0; i < 8; i++) { f.advance(30 * MINUTE); await f.engine.tick(); }
     assert.equal(f.state().retryAt - f.d.now(), 30 * MINUTE);

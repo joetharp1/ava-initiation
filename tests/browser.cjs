@@ -17,7 +17,7 @@ const mocks = {
  try{const ev={chat:[{role:'system',content:'STATE TRACKER fixture: established relationship'}]};await eventSource.emit('prompt',ev);const req={messages:ev.chat,stream:fixture.c.chatCompletionSettings.stream_openai};await eventSource.emit('request',req);fixture.request=req;
  if(req.stream||req.tools)throw Error('Streaming/tools were not suppressed');
  if(fixture.hang)await new Promise(r=>fixture.release=r);
- return fixture.output ?? JSON.stringify({text:'A small hello from the character.'});}finally{generating=false}}
+ return fixture.output ?? JSON.stringify({text:fixture.calls===1?'A small hello from the character.':'A new opening number '+fixture.calls+'.'});}finally{generating=false}}
  globalThis.fixture={calls:0,hang:false,c:{avatar:'A',characterId:0,characters:[{avatar:'A'}],chatId:'chat-a',name2:'Test Companion',chat:[],mainApi:'openai',chatCompletionSettings:{stream_openai:true,function_calling:true,prompts:[]},getCharacterCardFields:()=>({description:'A fictional adult companion.'}),substituteParams:x=>x,getTokenCountAsync:async x=>Math.ceil(x.length/3),addOneMessage(m){const p=document.createElement('p');p.className='message';p.textContent=m.mes;document.getElementById('chat').append(p)},saveChat:async()=>{}}};
  globalThis.host={eventSource,event_types};`,
 };
@@ -157,6 +157,7 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   await page.locator('[data-setting=telegramChatId]').fill('-123456789');
   await page.locator('[data-setting=telegramChatId]').press('Tab');await page.waitForTimeout(100);
   await page.locator('[data-setting=telegramEnabled]').check();await page.waitForTimeout(100);
+  await page.evaluate(()=>{fixture.output=null});
   await page.locator('#ava-fire').click();
   await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('notification sent'));
   assert.equal(telegramRequests.length,1);assert.equal(telegramRequests[0].get('text'),'Ava');
@@ -176,6 +177,7 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(telegramRequests[1].get('disable_notification'),'false');
   // A notification failure cannot undo a delivered chat message or trigger retry.
   rejectTelegram=true;
+  await page.evaluate(()=>{fixture.output=JSON.stringify({text:'Another opening for the failure test.'})});
   await page.locator('#ava-fire').click();
   await page.waitForFunction(()=>document.querySelector('#ava-telegram-status').textContent.includes('delivery unavailable'));
   assert.equal(await page.locator('.message').count(),6);assert.equal(telegramRequests.length,3);
@@ -226,6 +228,38 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(await page.evaluate(()=>fixture.c.chat.filter(m=>m.is_user).length),0);
   assert.equal(await page.evaluate(()=>localStorage.getItem('ava-initiation:v1:test-user:request-diagnostics-v1')),retainedDiagnostic);
   assert.equal(diagnosticConsole.length,0,'no new prompt capture during normal operation');
+  // Exercise the real bootPage adapter: line saved before bridge request,
+  // exactly one unread/notification, and a visible partial failure.
+  for (const failPhoto of [false, true]) {
+   await page.evaluate(async fail => {
+    fixture.c.chatId=fail?'photo-failure':'photo-success'; fixture.c.chat=[];fixture.output=null;
+    document.getElementById('chat').replaceChildren();fixture.saveCount=0;
+    fixture.c.saveChat=async()=>{fixture.saveCount++};
+    crypto.getRandomValues=array=>{array.fill(0);return array};
+    globalThis[Symbol.for('ava.veniceBridge')]={initiationVersion:1,busy:false,
+     initiationStatus:()=>({ready:true,costUsd:.06}),claimInitiation(){},releaseInitiation(){},endInitiation(){},cancel(){},
+     beginInitiation: options=>options,
+     async generateInitiation(token,scene){
+      if(fixture.saveCount!==1||fixture.c.chat.length!==1)throw Error('Line was not saved before image');
+      token.beforeRequest(.06);
+      if(fail)throw Error('HTTP 400: raw test image rejection');
+      const message={mes:'',extra:{ava_initiation:{attemptId:token.attemptId,type:'photo'},media:[{url:'/test-image.png'}]}};
+      fixture.c.chat.push(message);fixture.c.addOneMessage(message);token.onPublished(1,message);
+      await fixture.c.saveChat(); return JSON.stringify({status:'created'});
+     }};
+    await host.eventSource.emit('chat');
+   },failPhoto);
+   await page.locator('#ava-fire').click();
+   await page.waitForFunction(fail=>document.querySelector('#ava-status').textContent.includes(fail?'photo failed:':'Sent. Waiting'),failPhoto);
+   const result=await page.evaluate(()=>({chat:fixture.c.chat,saveCount:fixture.saveCount,
+    db:JSON.parse(localStorage.getItem('ava-initiation:v1:test-user:data')),key:JSON.stringify(['A',fixture.c.chatId])}));
+   assert.equal(result.chat.length,failPhoto?1:2);assert.equal(result.saveCount,failPhoto?1:2);
+   assert.equal(result.db.chats[result.key].unread,1);
+   const records=result.db.log.filter(r=>r.chat===result.key);
+   assert.equal(records.filter(r=>r.outcome==='sent').length,1);
+   if(failPhoto)assert.ok(records.some(r=>r.type==='photo'&&r.outcome==='failed'&&r.text.includes('raw test image rejection')));
+   else assert.equal(records.find(r=>r.outcome==='sent').image,'/test-image.png');
+  }
   assert.equal(errors.length,0,errors.join('\n'));
   console.log('PASS browser harness: disabled defaults, one text/no user turn, no follow-up, restored settings, denied-permission badge; controlled permission grant from enable toggle; real module-worker showNotification spy for full/generic previews and per-chat replacement; draft preservation; mobile 320/393/709/1024px; own-directory worker; raw parse-failure log and immediate manual retry; optional worker 401; Telegram full/generic delivery, 200-character cap, extension-settings token isolation, failed notification badge, no retry reload persistence, explicit Send test and exact API errors; automatic timer resumes with an exhausted diagnostic quota and no new request logging.');
  }finally{await browser.close();server.close()}
