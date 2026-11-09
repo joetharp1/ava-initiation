@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { stageNormal, installWorker, waitForNotificationWorker, observeServiceWorkerReady } from '../index.js';
+import { stageNormal, createWakeLoop, installWorker, waitForNotificationWorker, observeServiceWorkerReady } from '../index.js';
 function events() {
     const handlers = new Map(); return { makeLast: (name, fn) => handlers.set(name, [...(handlers.get(name) || []).filter(x => x !== fn), fn]),
         removeListener: (name, fn) => handlers.set(name, handlers.get(name).filter(x => x !== fn)),
@@ -62,6 +62,9 @@ test('ST 1.19 source confirms structured normal output returns before saveReply 
     assert.match(onSuccess, /returnInvalidJson: jsonSchema.returnInvalid/);
     assert.match(s, /if \(!result && returnInvalidJson\) \{\s*return text;/);
     assert.match(s, /!automatic_trigger.*send_if_empty/);
+    assert.match(s, /export function setSendButtonState\(value\) \{\s*is_send_press = value;/);
+    assert.match(s, /export function activateSendButtons\(\) \{\s*is_send_press = false;/);
+    assert.ok(s.indexOf('is_send_press = true;', s.indexOf('export async function Generate(')) < s.indexOf('async function onSuccess(data)', s.indexOf('export async function Generate(')));
 });
 
 for (const [name, output, expected] of [
@@ -298,4 +301,80 @@ test('tool-result continuation event sequence consumes entry guard once and deli
     assert.deepEqual(tools, original);
     assert.equal(f.c.chatCompletionSettings.stream_openai, true);
     assert.ok([...e.handlers.values()].every(list => !list.length));
+});
+
+test('prompt assembly failure releases ST busy flag so the next user send runs', async () => {
+    globalThis.document = { getElementById: () => ({ value: '' }) };
+    const e = events(), c = { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } };
+    let busy = false, userRequests = 0;
+    const host = { eventSource: e, event_types: { GENERATION_STARTED: 'start', GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' },
+        isGenerating: () => busy, setSendButtonState: value => { busy = value; },
+        async Generate(type, options) {
+            await e.emit('start', type, options, false);
+            await e.emit('commands', type, options, false);
+            busy = true; // ST sets this before prompt assembly, outside its network catch.
+            if (options.automatic_trigger) throw new Error('Prompt assembly failed');
+            userRequests++; busy = false; return 'User reply';
+        } };
+    await assert.rejects(stageNormal({ host, tools: {}, c, attempt: { guard() {} }, instruction: '' }), /Prompt assembly failed/);
+    assert.equal(busy, false, 'Send must not silently return due to the abandoned initiation flag');
+    assert.equal(await host.Generate('normal', {}), 'User reply'); assert.equal(userRequests, 1);
+    assert.equal(c.chatCompletionSettings.stream_openai, true);
+});
+
+test('user generation handoff revokes cancellation ownership before MESSAGE_SENT and late cleanup', async () => {
+    globalThis.document = { getElementById: () => ({ value: '' }) };
+    const e = events(), tools = { canPerformToolCalls: () => true }, original = { ...tools };
+    const c = { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } };
+    let release, started, cancel, oldCancel, busy = false, owned = true, stops = 0;
+    const pending = new Promise(r => { release = r; }), ready = new Promise(r => { started = r; });
+    const host = { eventSource: e, event_types: { GENERATION_STARTED: 'start', GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' },
+        isGenerating: () => busy, setSendButtonState: value => { busy = value; }, stopGeneration: () => { stops++; },
+        async Generate(type, options) {
+            await e.emit('start', type, options, false); await e.emit('commands', type, options, false);
+            busy = true; started(); await pending; return '{"text":"Stale initiation"}';
+        } };
+    const task = stageNormal({ host, tools, c, attempt: { guard() {} }, instruction: '',
+        onRelease: () => { owned = false; }, onCancelReady: fn => { cancel = fn; } });
+    await ready; oldCancel = cancel;
+    await e.emit('start', 'normal', { automatic_trigger: false }, false);
+    assert.equal(owned, false); assert.deepEqual(tools, original);
+    // MESSAGE_SENT coordinator cancellation must no longer own ST's stop control.
+    if (owned) cancel();
+    oldCancel(); assert.equal(stops, 0);
+    busy = true; release(); await assert.rejects(task, /superseded/);
+    assert.equal(busy, true, 'late initiation finally must preserve the real user generation');
+    assert.equal(c.chatCompletionSettings.stream_openai, true);
+});
+
+test('cancelled pending initiation removes global hooks immediately, before Generate settles', async () => {
+    globalThis.document = { getElementById: () => ({ value: '' }) };
+    const e = events(), tools = { canPerformToolCalls: () => true }, original = { ...tools };
+    const c = { mainApi: 'openai', chatCompletionSettings: { stream_openai: true } };
+    let cancel, release, started, busy = false, cancelled = false, stops = 0;
+    const pending = new Promise(r => { release = r; }), ready = new Promise(r => { started = r; });
+    const host = { eventSource: e, event_types: { GENERATION_AFTER_COMMANDS: 'commands', CHAT_COMPLETION_PROMPT_READY: 'prompt', CHAT_COMPLETION_SETTINGS_READY: 'request' },
+        isGenerating: () => busy, setSendButtonState: value => { busy = value; }, stopGeneration: () => { stops++; },
+        async Generate(type, options) { await e.emit('commands', type, options, false); busy = true; started(); await pending; return '{"text":"Too late"}'; } };
+    const task = stageNormal({ host, tools, c, attempt: { guard() { if (cancelled) throw new Error('Cancelled'); } }, instruction: '', onCancelReady: fn => { cancel = fn; } });
+    await ready; cancelled = true; cancel();
+    assert.deepEqual(tools, original); assert.equal(c.chatCompletionSettings.stream_openai, true);
+    assert.ok([...e.handlers.values()].every(list => !list.length)); assert.equal(stops, 1);
+    release(); await assert.rejects(task, /Cancelled/); assert.equal(busy, false);
+});
+
+test('chat wake returns immediately, coalesces repeated events and contains activation errors', async () => {
+    let seq = 0, calls = 0, refreshed = 0, release;
+    const timers = new Map(), failures = [];
+    const pending = new Promise(r => { release = r; });
+    const wake = createWakeLoop({ activate: async () => { calls++; if (calls === 1) await pending; else throw new Error('Wake failed'); },
+        refresh: () => { refreshed++; }, onError: e => failures.push(e.message),
+        setTimer: (fn, ms) => { timers.set(++seq, { fn, ms }); return seq; }, clearTimer: id => timers.delete(id) });
+    assert.equal(wake(), undefined); wake(); wake(); assert.equal(timers.size, 1);
+    const first = [...timers.values()][0]; timers.clear(); const run = first.fn();
+    assert.equal(wake(), undefined); wake(); assert.equal(calls, 1);
+    release(); await run; assert.equal(refreshed, 1); assert.equal(timers.size, 1);
+    const second = [...timers.values()][0]; timers.clear(); assert.equal(second.ms, 0);
+    await second.fn(); assert.deepEqual(failures, ['Wake failed']); assert.equal(refreshed, 2);
+    assert.equal(timers.size, 1); assert.equal([...timers.values()][0].ms, 5000);
 });

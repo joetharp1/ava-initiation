@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.14 — complete exchange context and a fresh initiation task for ST 1.19.0.
+/* Ava Initiation 0.1.15 — non-blocking wake scheduling and generation ownership cleanup for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -636,11 +636,11 @@ export function diagnosticFetch(original, capture) {
  * non-streaming is scoped to this call and restored. Function calling remains
  * enabled in settings; tool execution and request schemas are suppressed here.
  */
-export async function stageNormal({ host, tools, c, attempt, instruction, onDiagnostic }) {
+export async function stageNormal({ host, tools, c, attempt, instruction, onDiagnostic, onRelease = () => {}, onCancelReady = () => {} }) {
     if (c.mainApi !== 'openai' || typeof host.Generate !== 'function') throw new Error('Ava Initiation requires SillyTavern 1.19 Chat Completion mode.');
     const settings = c.chatCompletionSettings;
     const streamBefore = settings.stream_openai;
-    let restored = false, superseded = false;
+    let restored = false, superseded = false, ownsGeneration = false;
     const undos = [], check = () => {
         if (superseded) throw new Error('Initiation superseded by another generation; nothing was sent.');
         attempt.guard();
@@ -653,14 +653,31 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
     };
     let assembly = null, captured = false;
     const replace = (object, key, value) => {
-        const old = object[key]; object[key] = value;
-        undos.push(() => { if (object[key] === value) object[key] = old; });
+        const existed = Object.hasOwn(object, key), old = object[key]; object[key] = value;
+        undos.push(() => { if (object[key] === value) { if (existed) object[key] = old; else delete object[key]; } });
     };
     const listen = (name, fn) => {
+        if (!name) return;
         host.eventSource.makeLast(name, fn);
         undos.push(() => host.eventSource.removeListener(name, fn));
     };
+    const handoff = () => {
+        superseded = true; ownsGeneration = false;
+        restore(); onRelease();
+    };
+    const trackOwner = (type, options, dry) => {
+        if (dry || type === 'normal' && options?.automatic_trigger) return;
+        handoff();
+    };
     try {
+        // Retain ownership tracking after cancellation removes prompt hooks,
+        // until the old Generate promise settles.
+        if (host.event_types.GENERATION_STARTED) host.eventSource.makeLast(host.event_types.GENERATION_STARTED, trackOwner);
+        onCancelReady(() => {
+            restore();
+            // Only this still-owned generation may use ST's shared stop control.
+            if (ownsGeneration && !superseded) host.stopGeneration?.();
+        });
         settings.stream_openai = false;
         if (onDiagnostic) replace(globalThis, 'fetch', diagnosticFetch(globalThis.fetch, data => {
             check();
@@ -683,7 +700,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         // been consumed. Keep this handoff separate from the one-pass guard.
         listen(host.event_types.GENERATION_AFTER_COMMANDS, (type, options, dry) => {
             if (dry || type === 'normal' && options?.automatic_trigger) return;
-            superseded = true; restore();
+            handoff();
         });
         listen(host.event_types.GENERATION_AFTER_COMMANDS, (type, options, dry) => {
             if (dry || !entering) return;
@@ -692,6 +709,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
             if (String(document.getElementById('send_textarea')?.value || '') || host.isGenerating()) {
                 throw new Error('Composer or generation became busy before initiation.');
             }
+            ownsGeneration = true;
         });
         listen(host.event_types.CHAT_COMPLETION_PROMPT_READY, event => {
             if (event.dryRun) return;
@@ -745,7 +763,36 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         return text;
     } finally {
         restore();
+        if (host.event_types.GENERATION_STARTED) host.eventSource.removeListener(host.event_types.GENERATION_STARTED, trackOwner);
+        onCancelReady(null);
+        // ST sets its busy flag before prompt assembly, but errors there are
+        // outside its request catch. Release that flag only while still owner.
+        if (ownsGeneration && !superseded) {
+            host.setSendButtonState?.(false);
+            host.activateSendButtons?.();
+        }
+        onRelease();
     }
+}
+
+// Chat events must never await a timer generation. Coalesce wake events and
+// allow at most one activation loop, even while a provider request is pending.
+export function createWakeLoop({ activate, refresh, onError, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    let timer, running = false, again = false;
+    async function run() {
+        if (running) { again = true; return; }
+        running = true;
+        try { await activate(); }
+        catch (error) { onError(error); }
+        finally {
+            running = false; refresh();
+            clearTimer(timer); timer = setTimer(run, again ? 0 : 5000); again = false;
+        }
+    }
+    return () => {
+        if (running) { again = true; return; }
+        clearTimer(timer); timer = setTimer(run, 0);
+    };
 }
 
 // Wait on this narrow-scope registration, not the page's unrelated PWA worker.
@@ -807,7 +854,7 @@ export async function bootPage() {
     // Keep the legacy copy until the server-saved settings return on a later load.
     else if (legacyToken && telegramToken()) localStorage.removeItem(telegramTokenKey);
     const bridge = () => globalThis[Symbol.for('ava.veniceBridge')];
-    let notice = '', notificationRegistration = null, notificationSetup = null, adapter = null, wakeTimer = null;
+    let notice = '', notificationRegistration = null, notificationSetup = null, adapter = null;
     let notificationStatus = 'Notifications have not been set up. The unread badge remains available.';
     let telegramStatus = '';
     let browserNotificationsWanted = false;
@@ -892,7 +939,7 @@ export async function bootPage() {
             // Bridge cancel is called ONCE by this owner. Its ST stop listener
             // delegates back to the coordinator, which has already latched.
             if (bridge()?.initiationVersion === 1) bridge().cancel(id);
-            if (adapter.generating) host.stopGeneration();
+            if (adapter.generating) adapter.cancelGeneration?.();
             notice = reason;
         },
         deliver: async attempt => {
@@ -912,7 +959,10 @@ export async function bootPage() {
                     generate: async instruction => {
                         ready(); local.generating = true;
                         try { return await attempt.retryNetwork(() => {
-                            ready(); return stageNormal({ host, tools: tc.ToolManager, c: attempt.c, attempt, instruction });
+                            ready(); local.generating = true; return stageNormal({ host, tools: tc.ToolManager, c: attempt.c, attempt, instruction,
+                                onRelease: () => { local.generating = false; },
+                                onCancelReady: cancel => { local.cancelGeneration = cancel; },
+                            });
                         }); }
                         finally { local.generating = false; }
                     },
@@ -967,7 +1017,7 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.14 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.15 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
@@ -991,7 +1041,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.14 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.15 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1138,13 +1188,15 @@ export async function bootPage() {
     };
     panel.querySelector('#ava-fire').onclick = async () => { await engine.tick(true); await rearm(); };
     panel.querySelector('#ava-read').onclick = async () => { await engine.markRead(); refresh(); };
-    async function rearm() {
-        clearTimeout(wakeTimer); await engine.activate(); refresh();
-        // Short bounded wake checks handle background suspension and draft changes.
-        wakeTimer = setTimeout(rearm, 5000);
-    }
-    host.eventSource.on(host.event_types.CHAT_CHANGED, () => { selectTarget(); return rearm(); });
-    host.eventSource.on(host.event_types.MESSAGE_SENT, id => { engine.reply(id).then(refresh); });
+    const rearm = createWakeLoop({ activate: () => engine.activate(), refresh,
+        onError: error => { notice = failureText(error); }, });
+    // Yield while the user is composing, before the Send handler can silently
+    // return on ST's initiation-owned busy flag.
+    document.getElementById('send_textarea')?.addEventListener('input', event => {
+        if (String(event.target.value || '')) engine.cancel('User started typing.');
+    });
+    host.eventSource.on(host.event_types.CHAT_CHANGED, () => { engine.cancel('Chat changed.'); selectTarget(); rearm(); });
+    host.eventSource.on(host.event_types.MESSAGE_SENT, id => { engine.reply(id).then(refresh).catch(error => { notice = failureText(error); refresh(); }); });
     host.eventSource.on(host.event_types.GENERATION_STOPPED, () => engine.cancel('Generation stopped.'));
     window.addEventListener('focus', () => { selectTarget(); rearm(); });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { selectTarget(); rearm(); } });

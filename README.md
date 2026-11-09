@@ -1,6 +1,14 @@
-# Ava Initiation 0.1.14
+# Ava Initiation 0.1.15
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Chat access and reply recovery (0.1.15)
+
+Chat-change events now schedule a coalesced wake instead of waiting for a full initiation. Only one wake loop runs at a time; activation failures are caught and displayed. Starting to type cancels the pending initiation before the Send button can be blocked by its busy state.
+
+The generation adapter removes its temporary hooks on cancellation, releases ST's busy flag and send controls if prompt assembly throws while it still owns the generation, and relinquishes cancellation ownership when a user generation starts. Late cleanup must not clear the user's generation state. The page coordinator no longer calls ST's global stop control directly.
+
+Validation: 119 Node tests pass, with pinned ST 1.19 source contracts enabled. Regressions cover chat-event wake scheduling, pre-request failure recovery, immediate hook removal on cancellation and user-generation handoff. This fixes reproduced code-level failure paths; it does not establish which path occurred on Joe's phone. Live end-to-end verification remains outstanding. Keep initiation disabled until a controlled test; existing chat access takes priority. No changes to character cards, prompts, cadence or budgets.
 
 ## Fresh task after a completed exchange (0.1.14)
 
