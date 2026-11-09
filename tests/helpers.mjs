@@ -24,7 +24,7 @@ export function fixture(overrides = {}, shared = {}) {
         deliver: async a => {
             a.guard(); if (a.type === 'photo') a.reservePhoto(.06);
             const m = { mes: a.type === 'photo' ? '' : `${a.type} hello`, extra: { ava_initiation: { attemptId: a.id } } };
-            a.c.chat.push(m); a.onPublished(a.c.chat.length - 1, m); deliveries.push(a);
+            a.c.chat.push(m); await a.onPublished(a.c.chat.length - 1, m); deliveries.push(a);
         }, ...overrides };
     const engine = createEngine(d);
     return { engine, d, deliveries, cancels, notices, timers,

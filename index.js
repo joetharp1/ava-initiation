@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.12 — text-first photos, fresh openings and network recovery for ST 1.19.0.
+/* Ava Initiation 0.1.13 — verified delivery and repeat protection for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -130,6 +130,58 @@ export function lastAssistantText(chat = []) {
     return [...chat].reverse().find(m => !m.is_user && !m.is_system && typeof m.mes === 'string' && m.mes.trim())?.mes.trim() || '';
 }
 
+export function normalizedText(text) {
+    return String(text || '').normalize('NFKC').toLowerCase().replace(/[’']/g, '')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+export function repeatsOpening(text, previous) {
+    const a = normalizedText(text), b = normalizedText(previous);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const aa = a.split(' '), bb = b.split(' ');
+    // Avoid rejecting short, ordinary phrases that happen to share a word.
+    if (Math.min(aa.length, bb.length) < 6) return false;
+    const short = a.length < b.length ? a : b, long = a.length < b.length ? b : a;
+    if (long.includes(short) && short.length / long.length >= .65) return true;
+    // Token edit distance detects small substitutions and extra framing.
+    let row = bb.map((_, i) => i + 1); row.unshift(0);
+    for (let i = 1; i <= aa.length; i++) {
+        const next = [i];
+        for (let j = 1; j <= bb.length; j++) next[j] = Math.min(next[j - 1] + 1, row[j] + 1, row[j - 1] + (aa[i - 1] === bb[j - 1] ? 0 : 1));
+        row = next;
+    }
+    return row[bb.length] / Math.max(aa.length, bb.length) <= .22;
+}
+
+export async function readSavedChat(c, { fetcher = globalThis.fetch, headers, timeoutMs = 12000 } = {}) {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetcher('/api/chats/get', { method: 'POST', cache: 'no-store', headers,
+            signal: controller.signal, body: JSON.stringify({ ch_name: c.name2, file_name: c.chatId, avatar_url: c.avatar }) });
+        if (!response.ok) throw new Error(`Chat verification failed: HTTP ${response.status}. No delivery notification sent.`);
+        const data = await response.json();
+        if (!Array.isArray(data)) throw new Error('Chat verification returned an invalid response. Reload this chat before retrying.');
+        return data.filter(m => m && typeof m.mes === 'string');
+    } finally { clearTimeout(timer); }
+}
+
+export function assertSavedDelivery(saved, message) {
+    const id = message.extra?.ava_initiation?.attemptId;
+    if (!id) throw new Error('Cannot verify a message without an initiation ID.');
+    const image = message.extra?.media?.[0]?.url;
+    if (!saved.some(m => !m.is_user && !m.is_system && m.extra?.ava_initiation?.attemptId === id
+        && m.mes === message.mes && (!image || m.extra?.media?.some(part => part.url === image)))) {
+        throw new Error('Message is visible locally but its server save is not confirmed. No notification sent; reload this chat to check it.');
+    }
+}
+
+export function assertCurrentHistory(saved, local) {
+    const signature = rows => JSON.stringify(rows.map(m => [!!m.is_user, !!m.is_system, m.mes,
+        m.extra?.media?.map(part => part.url) || [], m.extra?.tool_invocations || []]));
+    if (signature(saved) !== signature(local)) throw new Error('This tab has different chat history from the server. Reload the chat before initiating; nothing was sent.');
+}
+
 export function failureText(error) {
     // Preserve provider detail, including non-Error throws. Never retain credentials.
     let detail;
@@ -169,9 +221,15 @@ export function openingInstruction(attempt, lastMessage) {
 
 export async function deliverOpening({ attempt, generate, publishText, publishPhoto }) {
     const lastMessage = lastAssistantText(attempt.c.chat);
-    const text = await generate(openingInstruction(attempt, lastMessage), lastMessage);
-    attempt.guard();
-    if (lastMessage && text.trim().toLowerCase() === lastMessage.toLowerCase()) throw new Error('Model repeated its last message; duplicate was not sent.');
+    const previous = attempt.c.chat.filter(m => !m.is_user && !m.is_system && m.mes?.trim()).slice(-8).map(m => m.mes);
+    let text;
+    for (let pass = 0; pass < 2; pass++) {
+        text = await generate(openingInstruction(attempt, lastMessage), lastMessage);
+        attempt.guard();
+        if (!previous.some(old => repeatsOpening(text, old))) break;
+        attempt.onRepeat?.();
+        if (pass) throw new Error('Model repeated a recent message twice; duplicate was not sent.');
+    }
     await publishText(text);
     if (attempt.type !== 'photo') return;
     attempt.guard();
@@ -243,6 +301,7 @@ export function createEngine(d) {
         if (running) { report('Waiting for the current initiation.'); return; }
         return locked(async () => {
             const c = d.active(); if (!c) return;
+            if (d.targetCurrent && !d.targetCurrent(c)) { report('Held: another chat was selected more recently.'); return; }
             if (d.diagnosticHold?.() && !diagnostic) { report('Diagnostic hold: ordinary firing is paused. Use Run two diagnostic attempts.'); return; }
             if (diagnostic && !d.canDiagnose?.(c)) { report('Diagnostic hold: two attempts already used, or select the original diagnostic chat.'); return; }
             let db = read(), s = state(db, c), t = now(), key = chatKey(c);
@@ -254,9 +313,23 @@ export function createEngine(d) {
             if (s.attempt) {
                 const a = s.attempt, idx = c.chat.findIndex(m => m.extra?.ava_initiation?.attemptId === a.id);
                 if (idx >= 0) {
+                    if (d.verifyDelivery) {
+                        if (s.retryAt > t) { report('Waiting for server confirmation. No new initiation will be sent.'); return; }
+                        try { await d.verifyDelivery(c, c.chat[idx]); }
+                        catch (error) {
+                            s.attempt.verificationPending = true; s.retryAt = t + MINUTE;
+                            log(db, key, 'save-unconfirmed', { timestamp: t, type: a.type, attemptId: a.id, ...failureInfo(error) });
+                            save(db); report(error.message); return;
+                        }
+                    }
                     try { recordDelivery(db, c, s, a, idx, c.chat[idx]); }
                     catch (error) { log(db, key, 'delivery-warning', { timestamp: now(), type: a.type, attemptId: a.id, text: String(error.message || error) }); }
-                    s.attempt = null;
+                    s.attempt = null; save(db);
+                    if (a.verificationPending) {
+                        report('Server save confirmed. Waiting for a reply.');
+                        await d.notify?.(c, c.chat[idx], db.config.preview);
+                        return;
+                    }
                 } else if (!a.delivered) {
                     if (t < a.deadline) { report('Waiting for an unfinished attempt to expire.'); return; }
                     log(db, key, 'failed', { timestamp: t, type: a.type, attemptId: a.id, text: 'Interrupted attempt; delivery not confirmed.' });
@@ -342,6 +415,7 @@ export function createEngine(d) {
             const isCurrent = () => {
                 const fresh = read(), held = d.readLease();
                 return !cancelled && now() < a.deadline && same(c) && eligible(fresh, c)
+                    && (!d.targetCurrent || d.targetCurrent(c))
                     && held?.owner === owner && held?.attemptId === a.id && held.expiresAt > now();
             };
             const guard = () => { if (!isCurrent()) throw new Error('Attempt expired, disabled, superseded or chat changed.'); };
@@ -356,7 +430,9 @@ export function createEngine(d) {
                 log(fresh, key, 'photo-reserved', { timestamp: now(), type: 'photo', attemptId: a.id, reservationId, costMicros: price, text: 'Provider request reserved against the local photo budget.' });
                 save(fresh);
             };
-            const onPublished = (id, message) => {
+            const onPublished = async (id, message) => {
+                guard();
+                if (d.verifyDelivery) await d.verifyDelivery(c, message);
                 guard(); const fresh = read(), cs = fresh.chats[key];
                 recordDelivery(fresh, c, cs, a, id, message); delivered ??= { id, message };
             };
@@ -376,7 +452,12 @@ export function createEngine(d) {
                             save(fresh); report('Network failure; retrying once…');
                         },
                     });
-                    return d.deliver({ ...a, c, history, isCurrent, guard, reservePhoto, onPublished, cancel, retryNetwork });
+                    return d.deliver({ ...a, c, history, isCurrent, guard, reservePhoto, onPublished, cancel, retryNetwork,
+                        onRepeat: () => {
+                            const fresh = read();
+                            log(fresh, key, 'repeat-rejected', { timestamp: now(), type, attemptId: a.id, text: 'Repeated output withheld. One fresh generation is allowed.' });
+                            save(fresh); report('Repeated opening rejected; trying once more…');
+                        } });
                 })();
                 await Promise.race([work, cancelPromise]);
                 guard();
@@ -386,7 +467,11 @@ export function createEngine(d) {
                 const fresh = read(), cs = fresh.chats[key];
                 const idx = c.chat.findIndex(m => m.extra?.ava_initiation?.attemptId === a.id);
                 if (idx >= 0 && !fresh.log.some(r => r.attemptId === a.id && r.outcome === 'sent')) {
-                    try { recordDelivery(fresh, c, cs, a, idx, c.chat[idx]); }
+                    try {
+                        if (d.verifyDelivery) await d.verifyDelivery(c, c.chat[idx]);
+                        recordDelivery(fresh, c, cs, a, idx, c.chat[idx]);
+                        delivered ??= { id: idx, message: c.chat[idx] };
+                    }
                     catch (error) { log(fresh, key, 'delivery-warning', { timestamp: now(), type, attemptId: a.id, text: String(error.message || error) }); }
                 }
                 if (idx < 0) {
@@ -398,13 +483,18 @@ export function createEngine(d) {
                     log(fresh, key, 'delivery-warning', { timestamp: now(), type, attemptId: a.id, text: failure });
                     log(fresh, key, 'failed', { timestamp: now(), type, attemptId: a.id, ...failureInfo(e), partialDelivery: true });
                 }
-                cs.attempt = null; save(fresh); report(`Initiation: ${failure}`);
+                const unconfirmed = idx >= 0 && !fresh.log.some(r => r.attemptId === a.id && r.outcome === 'sent');
+                cs.attempt = unconfirmed ? { ...a, verificationPending: true } : null;
+                if (unconfirmed) { cs.pending = null; cs.retryAt = now() + MINUTE; cs.state = 'save-unconfirmed'; }
+                save(fresh); report(`Initiation: ${failure}`);
             } finally {
                 d.clearTimer(timer); running = null;
                 // Late work has its own isCurrent fence; it cannot publish or charge.
                 d.finish?.(a.id);
                 const held = d.readLease(); if (held?.owner === owner && held.attemptId === a.id) d.clearLease();
-                const fresh = read(); fresh.chats[key].attempt = null; save(fresh);
+                const fresh = read();
+                if (!fresh.chats[key].attempt?.verificationPending) fresh.chats[key].attempt = null;
+                save(fresh);
             }
             if (delivered) {
                 report(failure ? `Line delivered; ${type} failed: ${failure}` : 'Sent. Waiting for a reply.');
@@ -615,7 +705,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
                     if (message.role !== 'assistant') continue;
                     const text = typeof message.content === 'string' ? message.content : Array.isArray(message.content)
                         ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '';
-                    if (!message.tool_calls?.length && text.trim() === excludedLastMessage.trim()) event.chat.splice(i, 1);
+                    if (!message.tool_calls?.length && repeatsOpening(text, excludedLastMessage)) event.chat.splice(i, 1);
                     break;
                 }
             }
@@ -709,7 +799,7 @@ export async function bootPage() {
     ]);
     const { getContext, extension_settings } = ext;
     const profile = users.getCurrentUserHandle();
-    const namespace = `${NAME}:v1:${profile}`, dataKey = `${namespace}:data`, leaseKey = `${namespace}:lease`;
+    const namespace = `${NAME}:v1:${profile}`, dataKey = `${namespace}:data`, leaseKey = `${namespace}:lease`, targetKey = `${namespace}:selected-chat`;
     const telegramTokenKey = `${namespace}:telegram-token`; // 0.1.6 migration only
     const telegramToken = () => String(extension_settings[NAME]?.telegramToken || '').trim();
     const telegramConfigured = () => !!(telegramToken() && engine.snapshot().config.telegramChatId);
@@ -740,6 +830,9 @@ export async function bootPage() {
     function active() {
         const c = getContext(), avatar = c.characters?.[c.characterId]?.avatar;
         return avatar && c.chatId && !c.groupId ? { ...c, avatar, group: c.groupId } : null;
+    }
+    function selectTarget() {
+        if (!document.hidden) localStorage.setItem(targetKey, JSON.stringify(active() ? chatKey(active()) : null));
     }
     async function notify(c, message, preview) {
         const config = engine.snapshot().config;
@@ -789,10 +882,17 @@ export async function bootPage() {
         read: () => jsonRead(dataKey), write: db => localStorage.setItem(dataKey, JSON.stringify(db)),
         readLease: () => jsonRead(leaseKey), writeLease: lease => localStorage.setItem(leaseKey, JSON.stringify(lease)),
         clearLease: () => localStorage.removeItem(leaseKey), active, hidden: () => document.hidden,
+        targetCurrent: c => jsonRead(targetKey) === chatKey(c),
         blocked: () => !!(adapter || host.isGenerating() || bridge()?.busy || chats.hasPendingFileAttachment()
             || String(document.getElementById('send_textarea')?.value || '').length),
         photoStatus: () => bridge()?.initiationVersion === 1 ? bridge().initiationStatus() : { ready: false, costUsd: null },
         countTokens: text => getContext().getTokenCountAsync(text),
+        verifyDelivery: async (c, message) => {
+            const saved = await readSavedChat(c, { headers: host.getRequestHeaders() });
+            assertSavedDelivery(saved, message);
+            // A photo save must preserve its previously delivered opening too.
+            for (const part of c.chat.filter(m => m.extra?.ava_initiation?.attemptId === message.extra?.ava_initiation?.attemptId)) assertSavedDelivery(saved, part);
+        },
         setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
         status: text => { notice = text; refresh(); }, notify,
         cancel: (id, reason) => {
@@ -814,6 +914,9 @@ export async function bootPage() {
                     attempt.guard();
                     if (String(document.getElementById('send_textarea')?.value || '') || chats.hasPendingFileAttachment()) throw new Error('Draft or attachment appeared; initiation stopped.');
                 };
+                ready();
+                const saved = await readSavedChat(attempt.c, { headers: host.getRequestHeaders() });
+                ready(); assertCurrentHistory(saved, attempt.c.chat);
                 await deliverOpening({ attempt,
                     generate: async (instruction, excludedLastMessage) => {
                         ready(); local.generating = true;
@@ -833,7 +936,7 @@ export async function bootPage() {
                         await host.eventSource.emit(host.event_types.MESSAGE_RECEIVED, id, 'extension');
                         await host.eventSource.emit(host.event_types.CHARACTER_MESSAGE_RENDERED, id, 'extension');
                         attempt.guard(); await attempt.c.saveChat();
-                        attempt.onPublished(id, message);
+                        await attempt.onPublished(id, message);
                     },
                     publishPhoto: async scene => {
                         ready();
@@ -853,7 +956,7 @@ export async function bootPage() {
                             finally { b.endInitiation(local.token); local.token = null; }
                         }, () => !published);
                         if (!published) throw new Error('Image generation ended without a published photo.');
-                        attempt.onPublished(published.id, published.message);
+                        await attempt.onPublished(published.id, published.message);
                     },
                 });
             } finally {
@@ -873,7 +976,7 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.13 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
@@ -897,7 +1000,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.12 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.13 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1049,11 +1152,14 @@ export async function bootPage() {
         // Short bounded wake checks handle background suspension and draft changes.
         wakeTimer = setTimeout(rearm, 5000);
     }
-    host.eventSource.on(host.event_types.CHAT_CHANGED, rearm);
+    host.eventSource.on(host.event_types.CHAT_CHANGED, () => { selectTarget(); return rearm(); });
     host.eventSource.on(host.event_types.MESSAGE_SENT, id => { engine.reply(id).then(refresh); });
     host.eventSource.on(host.event_types.GENERATION_STOPPED, () => engine.cancel('Generation stopped.'));
-    window.addEventListener('focus', rearm);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) rearm(); });
+    window.addEventListener('focus', () => { selectTarget(); rearm(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { selectTarget(); rearm(); } });
+    window.addEventListener('storage', event => {
+        if (event.key === targetKey) { engine.cancel('Another chat was selected.'); rearm(); }
+    });
     window.addEventListener('storage', event => { if (event.key === dataKey) { refresh(); if (!engine.running) rearm(); } });
     window.addEventListener('pagehide', () => engine.cancel('Page closed or suspended.'));
     navigator.serviceWorker?.addEventListener('message', event => {
@@ -1063,7 +1169,7 @@ export async function bootPage() {
             refresh();
         }
     });
-    await setupNotifications(false); await rearm();
+    selectTarget(); await setupNotifications(false); await rearm();
     return { engine, panel, refresh };
 }
 

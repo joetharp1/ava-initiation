@@ -1,6 +1,17 @@
-# Ava Initiation 0.1.12
+# Ava Initiation 0.1.13
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Verified delivery and repeat protection (0.1.13)
+
+- Rejects punctuation/quote-only copies and close word edits of the last eight assistant messages. One fresh generation is allowed; a second repeat fails visibly without posting or notifying. This is a similarity check, not a guarantee against every semantic paraphrase. The existing fixed instruction, system role and inherited temperature are preserved.
+- Reads the selected chat from ST before generation and compares it with local history. A stale tab is held with a reload instruction instead of writing over newer server history.
+- Checks `/api/chats/get` after each publication for the exact attempt ID, text and image URL, including the photo's opening line. ST's save methods can swallow errors; their return alone is no longer proof of delivery. Telegram follows verified publication.
+- If a local message has an unconfirmed save, holds that attempt and rechecks once a minute without generating a replacement. A later confirmed save can notify once. If confirmation continues to fail, reload the chat to inspect the server copy; no forced save or transcript deletion is performed.
+- Remembers the most recently selected visible chat across tabs in the same browser profile. Older tabs cannot initiate into a previously selected chat. Separate browsers/devices are not coordinated by this local selection record.
+- Shows version 0.1.13 in the panel heading.
+
+Validation: 112 Node tests passed, including ST 1.19 source-contract assertions, repeat retry limits, silent save failure/recovery, exact readback matching, stale history and stale-tab fences. Browser harness mocks were updated but the browser harness could not run in this environment (Chromium startup blocked). No live provider, server-save or Telegram test has been performed for this release. Install/update and use Fire now once in the intended chat, then reload to verify persistence.
 
 ## Text-first photos and network recovery (0.1.12)
 

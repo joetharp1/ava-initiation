@@ -9,6 +9,7 @@ const mocks = {
  '/scripts/constants.js': `export const MEDIA_TYPE={IMAGE:'image'};`,
  '/script.js': `export const event_types={CHAT_CHANGED:'chat',MESSAGE_SENT:'sent',MESSAGE_RECEIVED:'received',CHARACTER_MESSAGE_RENDERED:'rendered',GENERATION_STOPPED:'stop',GENERATION_AFTER_COMMANDS:'commands',CHAT_COMPLETION_PROMPT_READY:'prompt',CHAT_COMPLETION_SETTINGS_READY:'request'};
  const callbacks=new Map();export const eventSource={on(k,f){callbacks.set(k,[...(callbacks.get(k)||[]),f])},makeLast(k,f){this.on(k,f)},removeListener(k,f){callbacks.set(k,(callbacks.get(k)||[]).filter(x=>x!==f))},async emit(k,...args){for(const f of [...(callbacks.get(k)||[])])await f(...args)}};
+ export const getRequestHeaders=()=>({'Content-Type':'application/json'});
  let generating=false;export const isGenerating=()=>generating;export const saveSettingsDebounced=()=>{localStorage.setItem('fixture-settings',JSON.stringify(globalThis.fixtureSettings))};
  export function stopGeneration(){generating=false;eventSource.emit('stop')}
  export async function Generate(type,options){
@@ -17,8 +18,9 @@ const mocks = {
  try{const ev={chat:[{role:'system',content:'STATE TRACKER fixture: established relationship'}]};await eventSource.emit('prompt',ev);const req={messages:ev.chat,stream:fixture.c.chatCompletionSettings.stream_openai};await eventSource.emit('request',req);fixture.request=req;
  if(req.stream||req.tools)throw Error('Streaming/tools were not suppressed');
  if(fixture.hang)await new Promise(r=>fixture.release=r);
- return fixture.output ?? JSON.stringify({text:fixture.calls===1?'A small hello from the character.':'A new opening number '+fixture.calls+'.'});}finally{generating=false}}
- globalThis.fixture={calls:0,hang:false,c:{avatar:'A',characterId:0,characters:[{avatar:'A'}],chatId:'chat-a',name2:'Test Companion',chat:[],mainApi:'openai',chatCompletionSettings:{stream_openai:true,function_calling:true,prompts:[]},getCharacterCardFields:()=>({description:'A fictional adult companion.'}),substituteParams:x=>x,getTokenCountAsync:async x=>Math.ceil(x.length/3),addOneMessage(m){const p=document.createElement('p');p.className='message';p.textContent=m.mes;document.getElementById('chat').append(p)},saveChat:async()=>{}}};
+ return fixture.output ?? JSON.stringify({text:fixture.calls===1?'A small hello from the character.':['Fancy a walk?', 'I found something for you.', 'What are we having for tea?', 'Put some music on.'][fixture.calls%4]});}finally{generating=false}}
+ globalThis.fixture={calls:0,hang:false,c:{avatar:'A',characterId:0,characters:[{avatar:'A'}],chatId:'chat-a',name2:'Test Companion',chat:[],mainApi:'openai',chatCompletionSettings:{stream_openai:true,function_calling:true,prompts:[]},getCharacterCardFields:()=>({description:'A fictional adult companion.'}),substituteParams:x=>x,getTokenCountAsync:async x=>Math.ceil(x.length/3),addOneMessage(m){const p=document.createElement('p');p.className='message';p.textContent=m.mes;document.getElementById('chat').append(p)},saveChat:async()=>{fixture.saved[fixture.c.chatId]=structuredClone(fixture.c.chat)}}};
+ fixture.saved={};const originalFetch=globalThis.fetch;globalThis.fetch=(url,options)=>url==='/api/chats/get'?Promise.resolve(new Response(JSON.stringify([{chat_metadata:{}},...(fixture.saved[JSON.parse(options.body).file_name]||[])]),{status:200,headers:{'Content-Type':'application/json'}})):originalFetch(url,options);
  globalThis.host={eventSource,event_types};`,
 };
 const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>*{box-sizing:border-box}body{font:16px system-ui;background:#202020;color:#eee;margin:12px}#extensions_settings{display:flex;flex-direction:column;width:100%}.inline-drawer-header{padding:12px;background:#333}.inline-drawer-content{display:block}input,select,button{font:inherit}input{color:inherit;background:white}button{cursor:pointer}#send_textarea{width:100%;height:60px}</style></head><body><div id="extensions_settings"></div><div id="following">Next extension</div><div id="chat"></div><textarea id="send_textarea"></textarea><script type="module" src="/scripts/extensions/third-party/ava-initiation/index.js"></script></body></html>`;
@@ -234,7 +236,7 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
    await page.evaluate(async fail => {
     fixture.c.chatId=fail?'photo-failure':'photo-success'; fixture.c.chat=[];fixture.output=null;
     document.getElementById('chat').replaceChildren();fixture.saveCount=0;
-    fixture.c.saveChat=async()=>{fixture.saveCount++};
+    fixture.c.saveChat=async()=>{fixture.saveCount++;fixture.saved[fixture.c.chatId]=structuredClone(fixture.c.chat)};
     crypto.getRandomValues=array=>{array.fill(0);return array};
     globalThis[Symbol.for('ava.veniceBridge')]={initiationVersion:1,busy:false,
      initiationStatus:()=>({ready:true,costUsd:.06}),claimInitiation(){},releaseInitiation(){},endInitiation(){},cancel(){},

@@ -21,14 +21,14 @@ function photoFixture(failAt) {
             publishText: async text => {
                 order.push('line-save');
                 const message = { mes: text, extra: { ava_initiation: { attemptId: attempt.id } } };
-                f.c.chat.push(message); attempt.onPublished(0, message);
+                f.c.chat.push(message); await attempt.onPublished(0, message);
             },
             publishPhoto: async scene => {
                 order.push('image-request'); assert.match(scene, /cream jumper/);
                 attempt.reservePhoto(.06);
                 if (failAt === 'image') throw new Error('Venice HTTP 400: invalid image parameters');
                 const message = { mes: '', extra: { ava_initiation: { attemptId: attempt.id }, media: [{ url: '/photo.png' }] } };
-                f.c.chat.push(message); attempt.onPublished(1, message); order.push('image-save');
+                f.c.chat.push(message); await attempt.onPublished(1, message); order.push('image-save');
             },
         });
     } });
@@ -149,12 +149,12 @@ test('successful network retry after a line does not repeat the line or notifica
     let requests = 0, notices = 0;
     const f = fixture({ wait: async () => {}, notify: async () => notices++, deliver: async attempt => {
         const line = { mes: 'Here I am.', extra: { ava_initiation: { attemptId: attempt.id } } };
-        f.c.chat.push(line); attempt.onPublished(0, line);
+        f.c.chat.push(line); await attempt.onPublished(0, line);
         await attempt.retryNetwork(async () => {
             attempt.reservePhoto(.06);
             if (++requests === 1) throw new TypeError('Failed to fetch');
             const photo = { mes: '', extra: { ava_initiation: { attemptId: attempt.id }, media: [{ url: '/recovered.png' }] } };
-            f.c.chat.push(photo); attempt.onPublished(1, photo);
+            f.c.chat.push(photo); await attempt.onPublished(1, photo);
         });
     } });
     await f.engine.tick(true);
