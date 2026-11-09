@@ -85,7 +85,7 @@ test('exact repeated model output is rejected before publication', async () => {
         generate: async () => 'Same old line.', publishText: () => assert.fail(), publishPhoto: () => assert.fail() }), /duplicate was not sent/);
 });
 
-test('last assistant turn is removed only from request; system context and saved chat remain intact', async () => {
+test('completed exchange stays intact and the private task is the final user-role request', async () => {
     const handlers = new Map(), last = 'Her final message.';
     const source = { makeLast: (k, f) => handlers.set(k, [...(handlers.get(k) || []), f]), removeListener: (k, f) => handlers.set(k, handlers.get(k).filter(x => x !== f)) };
     const c = { mainApi: 'openai', chat: [{ mes: last }], chatCompletionSettings: { stream_openai: true } };
@@ -93,12 +93,15 @@ test('last assistant turn is removed only from request; system context and saved
         Generate: async () => {
             const event = { chat: [{ role: 'system', content: 'World Info' }, { role: 'user', content: 'Old exchange' }, { role: 'assistant', content: last }] };
             for (const fn of handlers.get('prompt')) await fn(event);
-            assert.deepEqual(event.chat.map(m => m.role), ['system', 'user', 'system']);
+            assert.deepEqual(event.chat.map(m => m.role), ['system', 'user', 'assistant', 'user']);
             assert.equal(event.chat[0].content, 'World Info');
+            assert.equal(event.chat[1].content, 'Old exchange');
+            assert.equal(event.chat[2].content, last);
+            assert.equal(event.chat.at(-1).content, 'Fresh opening');
             assert.equal(c.chat[0].mes, last);
             return '{"text":"Something new."}';
         } };
-    await stageNormal({ host, tools: {}, c, attempt: { guard() {} }, instruction: 'Fresh opening', excludedLastMessage: last });
+    await stageNormal({ host, tools: {}, c, attempt: { guard() {} }, instruction: 'Fresh opening' });
     assert.ok([...handlers.values()].every(list => list.length === 0));
 });
 

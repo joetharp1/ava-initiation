@@ -54,6 +54,8 @@ const html=`<!DOCTYPE html><html><head><meta name="viewport" content="width=devi
   assert.equal(await page.evaluate(()=>fixture.c.chatCompletionSettings.function_calling),true);
   assert.equal(await page.evaluate(()=>fixture.c.chatCompletionSettings.stream_openai),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('STATE TRACKER fixture'))),true);
+  assert.equal(await page.evaluate(()=>fixture.request.messages.at(-1).role),'user');
+  assert.equal(await page.evaluate(()=>fixture.request.messages.at(-1).content.includes('No new user message has arrived')),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('do not continue or answer'))),true);
   assert.equal(await page.evaluate(()=>fixture.request.messages.some(m=>m.content.includes('Do not include a name or timestamp header, just the message body'))),true);
   const deviceStamp=await page.evaluate(()=>({now:Date.now(),sent:fixture.c.chat[0].send_date,meta:fixture.c.chat[0].extra.ava_initiation.timestamp}));

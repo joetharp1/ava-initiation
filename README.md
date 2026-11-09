@@ -1,6 +1,14 @@
-# Ava Initiation 0.1.13
+# Ava Initiation 0.1.14
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Fresh task after a completed exchange (0.1.14)
+
+The private generation now retains the last assistant reply in ST's assembled context. Removing it in 0.1.12–0.1.13 could leave the preceding user message looking unanswered, encouraging a new version of the same answer.
+
+A request-only user-role task follows the completed exchange. It explicitly identifies itself as a private initiation task, states that no new user message arrived, and asks for a fresh subject or present-moment invitation instead of answering the old user turn again. It is never inserted into the saved or visible transcript. This replaces the previous trailing-system placement. The exact supplied repetition sentence remains unchanged; character cards, inherited temperature, normal user turns and existing World Info are untouched. The private photo-scene task also uses this request-only placement and retains the opening line in context.
+
+The 0.1.13 server verification, stale-tab protection, repeat retry limit and notification safeguards remain. Validation: 115 Node tests passed with the ST 1.19 source-contract check enabled. New integration cases run the opening/adapter pipeline to verify completed history, final task role, absence of a saved synthetic user turn, tool/multimodal history preservation and hook cleanup before ordinary replies. These tests verify request construction, not live model creativity. The browser harness remains unrun here because Chromium startup is blocked. No live paid generation was performed. Update, reload, check the panel says 0.1.14 and use Fire now once in the intended chat.
 
 ## Verified delivery and repeat protection (0.1.13)
 
