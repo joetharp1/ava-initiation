@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.15 — non-blocking wake scheduling and generation ownership cleanup for ST 1.19.0.
+/* Ava Initiation 0.1.16 — visible attempt instrumentation for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -10,7 +10,7 @@ export const DEFER_LIMIT = 10 * MINUTE;
 export const TYPES = ['photo', 'question', 'complaint', 'demand', 'one-liner'];
 export const DEFAULTS = Object.freeze({ enabled: false, allow: {}, min: 60, max: 120,
     quietStart: '23:00', quietEnd: '08:00', preview: 'generic', creditUsd: 0.12,
-    browserNotifications: false, telegramEnabled: false, telegramChatId: '' });
+    chatDiagnostics: true, browserNotifications: false, telegramEnabled: false, telegramChatId: '' });
 const SCHEMA = { name: 'ava_initiation', strict: true, returnInvalid: true, value: { type: 'object',
     properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } };
 // True only while this module is entering its own private Generate call.
@@ -23,6 +23,7 @@ export function validateConfig(value) {
     if (!Number.isFinite(c.creditUsd) || c.creditUsd < 0 || c.creditUsd > 100) throw new Error('Daily photo budget must be $0–$100.');
     c.creditUsd = Math.floor(c.creditUsd * 1e6) / 1e6;
     c.preview = c.preview === 'full' ? 'full' : 'generic';
+    c.chatDiagnostics = c.chatDiagnostics !== false;
     c.browserNotifications = c.browserNotifications === true;
     c.telegramEnabled = c.telegramEnabled === true;
     c.telegramChatId = String(c.telegramChatId ?? '').trim();
@@ -198,6 +199,77 @@ export function failureInfo(error) {
     return { errorName, tag: network ? 'network' : 'error', text: failureText(error) };
 }
 
+export function formatAttemptTrace(row) {
+    const stamp = Number.isFinite(row.timestamp) ? new Date(row.timestamp).toISOString() : 'Unknown time';
+    return `[Initiation ${stamp}] ${row.event} | attempt ${row.attemptId || 'none'} | retry ${row.retry ?? 'unknown'} | ${row.type || 'scheduler'} | ${row.detail ? failureText(row.detail) : '—'}`;
+}
+
+export function createAttemptTrace({ read, write, changed = () => {} }) {
+    let rows;
+    try { const value = read(); rows = Array.isArray(value) ? value.slice(-80) : []; } catch { rows = []; }
+    return {
+        rows: () => structuredClone(rows),
+        append(row) {
+            // Keep only diagnostic fields, never request bodies or model context.
+            const entry = { timestamp: row.timestamp, chat: row.chat, attemptId: row.attemptId,
+                type: row.type, retry: row.retry, event: String(row.event).slice(0, 80),
+                detail: row.detail ? failureText(row.detail).slice(0, 2000) : '' };
+            rows = [...rows, entry].slice(-80);
+            try { write(rows); } catch { /* retain an in-memory copy if storage fails */ }
+            try { changed(); } catch { /* UI failure must not affect generation */ }
+        },
+    };
+}
+
+// Passive observation of the existing initiation request. Never read its body,
+// change its signal, retry it, or consume the response returned to SillyTavern.
+export function traceInitiationFetch(original, trace) {
+    const emit = (event, detail) => { try { trace(event, detail); } catch { /* diagnostic only */ } };
+    return async function(input, options) {
+        const url = typeof input === 'string' ? input : input?.url;
+        let target;
+        try { target = new URL(url, globalThis.location?.href || 'http://localhost/'); } catch { /* unrelated fetch */ }
+        if (target?.pathname !== '/api/backends/chat-completions/generate'
+            || String(options?.method || input?.method || 'GET').toUpperCase() !== 'POST') return original.call(this, input, options);
+        const started = Date.now();
+        emit('request-start', 'POST chat-completions/generate; awaiting response.');
+        let response;
+        try { response = await original.call(this, input, options); }
+        catch (error) { emit('request-error', failureText(error)); throw error; }
+        emit('response-headers', `HTTP ${response.status}; ${Date.now() - started}ms.`);
+        // Bounded, detached inspection also captures HTTP 200 error envelopes.
+        // A stalled diagnostic reader cannot delay ST or grow an unbounded copy.
+        inspectTraceResponse(response, emit).catch(() => {});
+        return response;
+    };
+}
+
+async function inspectTraceResponse(response, emit) {
+    if (/text\/event-stream/i.test(response.headers?.get('content-type') || '')) return;
+    let reader, timer;
+    try {
+        reader = response.clone().body?.getReader();
+        if (!reader) return;
+        const decoder = new TextDecoder(); let text = '', bytes = 0;
+        const read = async () => {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) { text += decoder.decode(); return true; }
+                bytes += value.byteLength;
+                if (bytes > 65536) return false;
+                text += decoder.decode(value, { stream: true });
+            }
+        };
+        const complete = await Promise.race([read(), new Promise(resolve => { timer = setTimeout(() => resolve(false), 3000); })]);
+        if (!complete) { emit('response-detail-unavailable', 'Diagnostic body read reached its 64 KiB / 3s limit; request unchanged.'); return; }
+        let data; try { data = JSON.parse(text); } catch { /* non-JSON error body */ }
+        if (data?.error) emit('provider-error', failureText(data.error).slice(0, 2000));
+        else if (!response.ok) emit('http-error', failureText(text).slice(0, 2000));
+        else emit('response-body-read', 'Response received; no top-level error envelope.');
+    } catch (error) { emit('response-detail-unavailable', failureText(error)); }
+    finally { clearTimeout(timer); if (reader) reader.cancel().catch(() => {}); }
+}
+
 export async function retryFailedFetch(work, { state = { used: false }, guard = () => {}, onRetry = () => {},
     canRetry = () => true, wait = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
     try { return await work(); }
@@ -246,6 +318,11 @@ export function createEngine(d) {
     const owner = d.uuid();
     const now = () => d.now();
     const report = text => d.status?.(text);
+    // Observations must never change scheduling or interrupt delivery.
+    const trace = (c, a, event, detail = '') => {
+        try { d.trace?.({ timestamp: now(), chat: c ? chatKey(c) : null, attemptId: a?.id || null,
+            type: a?.type || null, retry: a?.retry ?? null, event, detail: failureText(detail) }); } catch { /* diagnostic only */ }
+    };
     const read = () => {
         const db = d.read();
         if (db.version !== 1 || !db.chats || !Array.isArray(db.log)) throw new Error('Unsupported or damaged initiation storage. Scheduling paused.');
@@ -264,7 +341,7 @@ export function createEngine(d) {
                 if (!lock) { report('Waiting: another window owns the initiation lock.'); return; }
                 return work();
             });
-        } catch (e) { fatal = `Paused: ${e.message || e}`; report(fatal); }
+        } catch (e) { trace(d.active(), running, 'scheduler-error', e); fatal = `Paused: ${e.message || e}`; report(fatal); }
     }
     function same(c) { const a = d.active(); return a && chatKey(a) === chatKey(c) && a.chat === c.chat; }
     function confirmed(c, id) { return c.chat.findIndex(m => m.extra?.ava_initiation?.attemptId === id && !m.is_user && !m.is_system) >= 0; }
@@ -398,7 +475,7 @@ export function createEngine(d) {
                 p.type = type; delete p.deferAt; save(db);
                 report('Held, app backgrounded'); return;
             }
-            const a = { id: d.uuid(), type, sulk: p.sulk, startedAt: t, deadline: t + DEADLINE, delivered: false };
+            const a = { id: d.uuid(), type, sulk: p.sulk, startedAt: t, deadline: t + DEADLINE, delivered: false, retry: s.failureCount };
             if (diagnostic) d.reserveDiagnostic(c, a);
             // Consume one manual retry; a failure must return to automatic backoff.
             p.manual = false; s.attempt = a; save(db);
@@ -410,6 +487,7 @@ export function createEngine(d) {
             // One coordinator owns the timeout, stop-event and chat-switch paths.
             const cancel = reason => {
                 if (cancelled) return; cancelled = true;
+                trace(c, a, 'cancel', reason);
                 try { d.cancel(a.id, reason); } finally { rejectCancel(new Error(reason)); }
             };
             const isCurrent = () => {
@@ -437,23 +515,27 @@ export function createEngine(d) {
                 recordDelivery(fresh, c, cs, a, id, message); delivered ??= { id, message };
             };
             running = { ...a, cancel, key }; timer = d.setTimer(() => cancel('Initiation timed out after 150 seconds.'), DEADLINE);
+            trace(c, a, 'start', `Deadline ${DEADLINE / 1000}s; ${manual ? 'manual' : 'scheduled'} attempt.`);
             report(`Preparing ${type}${a.sulk ? ' (sulk)' : ''}…`);
             try {
                 let history = '[]';
                 const work = (async () => {
                     try { history = await historyWithinTokens(read().log.filter(r => r.chat === key), d.countTokens, 512, lastAssistantText(c.chat)); }
-                    catch { report('History omitted: token count failed.'); }
+                    catch (error) { trace(c, a, 'history-error', error); report('History omitted: token count failed.'); }
                     guard();
                     const retryNetwork = (work, canRetry = () => true) => retryFailedFetch(work, {
                         state: retryState, guard, canRetry, wait: d.wait,
                         onRetry: error => {
+                            trace(c, a, 'network-retry', `Network retry 1/1 after 1s: ${failureText(error)}`);
                             const fresh = read();
                             log(fresh, key, 'retry', { timestamp: now(), type, attemptId: a.id, ...failureInfo(error) });
                             save(fresh); report('Network failure; retrying once…');
                         },
                     });
                     return d.deliver({ ...a, c, history, isCurrent, guard, reservePhoto, onPublished, cancel, retryNetwork,
+                        trace: (event, detail) => trace(c, a, event, detail),
                         onRepeat: () => {
+                            trace(c, a, 'repeat-rejected', 'Duplicate opening rejected; at most two opening generations per attempt.');
                             const fresh = read();
                             log(fresh, key, 'repeat-rejected', { timestamp: now(), type, attemptId: a.id, text: 'Repeated output withheld. One fresh generation is allowed.' });
                             save(fresh); report('Repeated opening rejected; trying once more…');
@@ -464,6 +546,7 @@ export function createEngine(d) {
                 if (!delivered && !confirmed(c, a.id)) throw new Error('Generation ended without a confirmed message ID.');
             } catch (e) {
                 failure = failureText(e);
+                trace(c, a, 'failed', e);
                 const fresh = read(), cs = fresh.chats[key];
                 const idx = c.chat.findIndex(m => m.extra?.ava_initiation?.attemptId === a.id);
                 if (idx >= 0 && !fresh.log.some(r => r.attemptId === a.id && r.outcome === 'sent')) {
@@ -486,8 +569,11 @@ export function createEngine(d) {
                 const unconfirmed = idx >= 0 && !fresh.log.some(r => r.attemptId === a.id && r.outcome === 'sent');
                 cs.attempt = unconfirmed ? { ...a, verificationPending: true } : null;
                 if (unconfirmed) { cs.pending = null; cs.retryAt = now() + MINUTE; cs.state = 'save-unconfirmed'; }
-                save(fresh); report(`Initiation: ${failure}`);
+                save(fresh);
+                if (idx < 0) trace(c, a, 'backoff', `Failure count ${cs.failureCount}; next eligible retry ${new Date(cs.retryAt).toISOString()}; no lifetime attempt cap.`);
+                report(`Initiation: ${failure}`);
             } finally {
+                trace(c, a, 'finished', failure ? 'Failed or cancelled; cleanup begins.' : 'Delivery confirmed.');
                 d.clearTimer(timer); running = null;
                 // Late work has its own isCurrent fence; it cannot publish or charge.
                 d.finish?.(a.id);
@@ -636,7 +722,7 @@ export function diagnosticFetch(original, capture) {
  * non-streaming is scoped to this call and restored. Function calling remains
  * enabled in settings; tool execution and request schemas are suppressed here.
  */
-export async function stageNormal({ host, tools, c, attempt, instruction, onDiagnostic, onRelease = () => {}, onCancelReady = () => {} }) {
+export async function stageNormal({ host, tools, c, attempt, instruction, onDiagnostic, onTrace, onRelease = () => {}, onCancelReady = () => {} }) {
     if (c.mainApi !== 'openai' || typeof host.Generate !== 'function') throw new Error('Ava Initiation requires SillyTavern 1.19 Chat Completion mode.');
     const settings = c.chatCompletionSettings;
     const streamBefore = settings.stream_openai;
@@ -679,6 +765,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
             if (ownsGeneration && !superseded) host.stopGeneration?.();
         });
         settings.stream_openai = false;
+        if (onTrace) replace(globalThis, 'fetch', traceInitiationFetch(globalThis.fetch, onTrace));
         if (onDiagnostic) replace(globalThis, 'fetch', diagnosticFetch(globalThis.fetch, data => {
             check();
             if (captured) throw new Error('Diagnostic allows one outgoing request per attempt; extra request blocked.');
@@ -710,10 +797,12 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
                 throw new Error('Composer or generation became busy before initiation.');
             }
             ownsGeneration = true;
+            onTrace?.('generation-entered', 'ST command handling completed.');
         });
         listen(host.event_types.CHAT_COMPLETION_PROMPT_READY, event => {
             if (event.dryRun) return;
             check();
+            onTrace?.('prompt-ready', 'ST context assembly completed.');
             if (!Array.isArray(event.chat)) throw new Error('ST did not provide an assembled Chat Completion prompt.');
             // Keep both sides of the completed exchange. Removing its last
             // reply makes the old user turn look unanswered. This request-only
@@ -723,6 +812,7 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         });
         listen(host.event_types.CHAT_COMPLETION_SETTINGS_READY, data => {
             check();
+            onTrace?.('settings-ready', 'ST request parameters assembled.');
             if (settings.stream_openai !== false) throw new Error('Streaming changed during the private initiation.');
             data.stream = false; data.n = 1;
             delete data.tools; delete data.tool_choice; delete data.parallel_tool_calls;
@@ -739,11 +829,13 @@ export async function stageNormal({ host, tools, c, attempt, instruction, onDiag
         let result;
         entering = true;
         try {
+            onTrace?.('generation-called', 'Entering ST normal generation.');
             result = await host.Generate('normal', { automatic_trigger: true, jsonSchema: SCHEMA });
         } finally {
             if (!restored) entering = false;
         }
         check();
+        onTrace?.('generation-returned', 'ST generation promise resolved.');
         const raw = typeof result === 'string' || result instanceof String ? String(result) : (result?.text ?? '');
         const stripped = (typeof raw === 'string' ? raw : '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
         let text = '';
@@ -838,6 +930,7 @@ export async function bootPage() {
     const { getContext, extension_settings } = ext;
     const profile = users.getCurrentUserHandle();
     const namespace = `${NAME}:v1:${profile}`, dataKey = `${namespace}:data`, leaseKey = `${namespace}:lease`, targetKey = `${namespace}:selected-chat`;
+    const traceKey = `${namespace}:attempt-trace-v1`;
     const telegramTokenKey = `${namespace}:telegram-token`; // 0.1.6 migration only
     const telegramToken = () => String(extension_settings[NAME]?.telegramToken || '').trim();
     const telegramConfigured = () => !!(telegramToken() && engine.snapshot().config.telegramChatId);
@@ -868,6 +961,28 @@ export async function bootPage() {
     function active() {
         const c = getContext(), avatar = c.characters?.[c.characterId]?.avatar;
         return avatar && c.chatId && !c.groupId ? { ...c, avatar, group: c.groupId } : null;
+    }
+    const attemptTrace = createAttemptTrace({ read: () => jsonRead(traceKey),
+        write: rows => localStorage.setItem(traceKey, JSON.stringify(rows)),
+        changed: () => renderTrace() });
+    function renderTrace() {
+        if (!engine.snapshot().config.chatDiagnostics) {
+            document.querySelectorAll('.ava-attempt-trace').forEach(el => el.remove()); return;
+        }
+        const c = active(), container = document.getElementById('chat');
+        if (!c || !container) return;
+        const key = chatKey(c);
+        // Fixed bounds, plain text, no ST chat mutations, save calls or message
+        // events. Diagnostics cannot enter model context, TTS or photo history.
+        document.querySelectorAll('.ava-attempt-trace').forEach(el => el.remove());
+        const rows = attemptTrace.rows().filter(r => r.chat === key).slice(-20);
+        if (!rows.length) return;
+        const box = document.createElement('div'); box.className = 'ava-attempt-trace';
+        box.setAttribute('role', 'log'); box.setAttribute('aria-label', 'Initiation diagnostics');
+        for (const row of rows) {
+            const line = document.createElement('p'); line.textContent = formatAttemptTrace(row); box.append(line);
+        }
+        container.append(box);
     }
     function selectTarget() {
         if (!document.hidden) localStorage.setItem(targetKey, JSON.stringify(active() ? chatKey(active()) : null));
@@ -933,6 +1048,7 @@ export async function bootPage() {
         },
         setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
         status: text => { notice = text; refresh(); }, notify,
+        trace: row => attemptTrace.append(row),
         cancel: (id, reason) => {
             if (!adapter || adapter.id !== id || adapter.cancelled) return;
             adapter.cancelled = true;
@@ -953,13 +1069,16 @@ export async function bootPage() {
                     if (String(document.getElementById('send_textarea')?.value || '') || chats.hasPendingFileAttachment()) throw new Error('Draft or attachment appeared; initiation stopped.');
                 };
                 ready();
+                attempt.trace('chat-read-start', 'Checking server history; 12s read deadline.');
                 const saved = await readSavedChat(attempt.c, { headers: host.getRequestHeaders() });
                 ready(); assertCurrentHistory(saved, attempt.c.chat);
+                attempt.trace('chat-read-ok', 'Server and local history agree.');
                 await deliverOpening({ attempt,
                     generate: async instruction => {
                         ready(); local.generating = true;
                         try { return await attempt.retryNetwork(() => {
                             ready(); local.generating = true; return stageNormal({ host, tools: tc.ToolManager, c: attempt.c, attempt, instruction,
+                                onTrace: attempt.trace,
                                 onRelease: () => { local.generating = false; },
                                 onCancelReady: cancel => { local.cancelGeneration = cancel; },
                             });
@@ -968,6 +1087,7 @@ export async function bootPage() {
                     },
                     publishText: async text => {
                         ready();
+                        attempt.trace('text-publish-start', 'Adding opening line to chat.');
                         const sentAt = Date.now();
                         const message = { name: attempt.c.name2, is_user: false, is_system: false,
                             send_date: sentAt, mes: text,
@@ -976,8 +1096,12 @@ export async function bootPage() {
                         attempt.c.addOneMessage(message);
                         await host.eventSource.emit(host.event_types.MESSAGE_RECEIVED, id, 'extension');
                         await host.eventSource.emit(host.event_types.CHARACTER_MESSAGE_RENDERED, id, 'extension');
-                        attempt.guard(); await attempt.c.saveChat();
+                        attempt.guard();
+                        attempt.trace('chat-save-start', 'Saving opening line.');
+                        await attempt.c.saveChat();
+                        attempt.trace('chat-verify-start', 'Checking saved opening; 12s read deadline.');
                         await attempt.onPublished(id, message);
+                        attempt.trace('text-delivered', 'Opening saved and verified.');
                     },
                     publishPhoto: async scene => {
                         ready();
@@ -993,7 +1117,7 @@ export async function bootPage() {
                                 isCurrent: () => attempt.isCurrent() && !String(document.getElementById('send_textarea')?.value || '') && !chats.hasPendingFileAttachment(),
                                 beforeRequest: attempt.reservePhoto, onPublished: (id, message) => { published = { id, message }; },
                                 onStop: () => attempt.cancel('Generation stopped.') });
-                            try { await b.generateInitiation(local.token, scene); }
+                            try { attempt.trace('photo-start', 'Calling image bridge.'); await b.generateInitiation(local.token, scene); }
                             finally { b.endInitiation(local.token); local.token = null; }
                         }, () => !published);
                         if (!published) throw new Error('Image generation ended without a published photo.');
@@ -1009,6 +1133,7 @@ export async function bootPage() {
     });
     const panel = document.createElement('div'); panel.id = 'ava-initiation-settings'; panel.className = 'extension_container';
     panel.innerHTML = `<style>
+      .ava-attempt-trace{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #999;padding:10px;margin:10px;font:13px monospace;}
       #ava-initiation-settings .ava-body{height:480px;max-height:65dvh;overflow:auto;box-sizing:border-box;padding:8px;min-width:0;}
       #ava-initiation-settings .inline-drawer-content{height:auto!important;max-height:none!important;overflow:visible!important;}
       #ava-initiation-settings label{display:flex;align-items:center;gap:8px;margin:9px 0;flex-wrap:wrap;}
@@ -1017,9 +1142,12 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.15 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.16 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
+      <label><input type="checkbox" data-setting="chatDiagnostics"> Show attempt diagnostics in chat</label>
+      <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
+      <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. Failed attempts can retry indefinitely; a long interval is not a one-attempt mode. Set daily photo budget to 0 for text-only testing.</p>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
       <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
       <label>Maximum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="max"></label>
@@ -1038,10 +1166,11 @@ export async function bootPage() {
       <p id="ava-budget"></p><p>At most two charged photo attempts per local calendar day across all companions. Failed provider attempts count. Text continues when photos reach either cap. Equal quiet times disable quiet hours.</p>
       <button type="button" class="menu_button" id="ava-fire">Fire now</button>
       <button type="button" class="menu_button" id="ava-read">Mark initiations read</button>
+      <textarea id="ava-trace-copy" class="text_pole" readonly aria-label="Copyable attempt diagnostics" placeholder="Copy attempt diagnostics also shows the text here"></textarea>
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.15 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.16 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1170,6 +1299,7 @@ export async function bootPage() {
             }
             await permissionTask;
             if (el.dataset.setting?.startsWith('telegram')) await setupNotifications(false);
+            renderTrace();
             await rearm();
         } catch (e) { notice = e.message; refresh(); }
     });
@@ -1186,6 +1316,16 @@ export async function bootPage() {
             notificationDiagnostic('Telegram test did not deliver; see the API response beneath Send test.');
         } finally { button.disabled = false; }
     };
+    panel.querySelector('#ava-copy-trace').onclick = async () => {
+        const c = active(), key = c && chatKey(c);
+        const current = attemptTrace.rows().filter(r => !key || r.chat === key).map(formatAttemptTrace);
+        const previous = engine.snapshot().log.filter(r => (!key || r.chat === key) && ['failed', 'save-unconfirmed', 'delivery-warning'].includes(r.outcome)).slice(-10)
+            .map(r => formatAttemptTrace({ ...r, event: `stored-${r.outcome}`, retry: null, detail: r.text }));
+        const text = [...previous, ...current].join('\n') || 'No initiation failures or attempt events recorded in this browser.';
+        try { await navigator.clipboard.writeText(text); notice = 'Attempt diagnostics copied.'; }
+        catch { notice = 'Copy unavailable. Select the diagnostic text below.'; }
+        panel.querySelector('#ava-trace-copy').value = text; refresh();
+    };
     panel.querySelector('#ava-fire').onclick = async () => { await engine.tick(true); await rearm(); };
     panel.querySelector('#ava-read').onclick = async () => { await engine.markRead(); refresh(); };
     const rearm = createWakeLoop({ activate: () => engine.activate(), refresh,
@@ -1195,7 +1335,7 @@ export async function bootPage() {
     document.getElementById('send_textarea')?.addEventListener('input', event => {
         if (String(event.target.value || '')) engine.cancel('User started typing.');
     });
-    host.eventSource.on(host.event_types.CHAT_CHANGED, () => { engine.cancel('Chat changed.'); selectTarget(); rearm(); });
+    host.eventSource.on(host.event_types.CHAT_CHANGED, () => { engine.cancel('Chat changed.'); selectTarget(); renderTrace(); rearm(); });
     host.eventSource.on(host.event_types.MESSAGE_SENT, id => { engine.reply(id).then(refresh).catch(error => { notice = failureText(error); refresh(); }); });
     host.eventSource.on(host.event_types.GENERATION_STOPPED, () => engine.cancel('Generation stopped.'));
     window.addEventListener('focus', () => { selectTarget(); rearm(); });
@@ -1212,7 +1352,7 @@ export async function bootPage() {
             refresh();
         }
     });
-    selectTarget(); await setupNotifications(false); await rearm();
+    selectTarget(); renderTrace(); await setupNotifications(false); await rearm();
     return { engine, panel, refresh };
 }
 

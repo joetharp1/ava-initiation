@@ -1,6 +1,29 @@
-# Ava Initiation 0.1.15
+# Ava Initiation 0.1.16
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Instrumentation only (0.1.16)
+
+The live 0.1.15 test still disrupted chat access. This release does **not** claim to fix it. Generation, retry cadence, cancellation, prompts and photo selection remain unchanged. It adds bounded diagnostic lines in the chat area, enabled by default, and **Copy attempt diagnostics** (with a selectable-text fallback). Copy works with initiation disabled and includes the last ten previously stored failure/warning entries.
+
+Each new attempt records UTC timestamp, attempt ID, type, scheduler retry count (zero for first attempt), stage and available error. Stages cover server history reads, ST generation entry, prompt/settings assembly, the HTTP request/response, publication, save verification, cancellation and backoff. HTTP 200 provider error envelopes are captured as well as HTTP failures and rejected fetches. Response inspection is detached from generation, limited to 64 KiB and three seconds, and does not alter the request or consume ST's response. Recorded detail is capped at 2,000 characters with credential redaction; truncation/inspection limits mean the full body is not guaranteed.
+
+Diagnostics retain at most 80 events in this browser/profile; the latest 20 for the selected chat are rendered as plain text. They are **local diagnostic messages**, not companion/user transcript entries: no chat mutation, save call, message event, model-context injection or TTS. They survive reload in the same browser storage, but do not transfer to a separate browser/incognito profile. Disabling their display does not disable collection. Diagnostic storage/rendering failures do not fail generation.
+
+### Four code findings (10 November 2026)
+
+1. The exact error from the reported live initiation is still unknown. Existing attempt failures were stored in the extension's Recent initiation log and status line, not posted in chat. ST can also handle an error before the adapter receives useful detail. Whole-attempt deadline: **150 seconds**, emitting `Initiation timed out after 150 seconds.` Server-chat reads independently time out at **12 seconds**. New instrumentation identifies the last completed stage and captures the available response error.
+2. Scheduler failure backoff is **1, 2, 4, 8, 16, 30, 30... minutes**, with **no maximum attempt count**. A `TypeError` containing `Failed to fetch` permits one additional network attempt after **one second**, shared across the initiation's operations. Repeated opening detection permits at most **two opening generations**; a photo also needs a scene generation. Telegram, if enabled, has its own maximum of three attempts for explicit retryable API responses, not ambiguous network failures. Thus one scheduler attempt can contain several requests. A failed save verification rechecks once per minute without generating a replacement.
+3. There is no per-chat `setInterval`. `CHAT_CHANGED` cancels the active attempt and invokes one coalesced wake loop per tab. Rearming clears its pending timeout; if an activation is running, it records one pending wake. The wake check runs again after five seconds. The attempt's deadline timer is cleared in `finally`. These findings do not demonstrate timer stacking in the live failure. Separate open tabs still have their own wake loops, coordinated through profile locks/leases and selected-chat storage.
+4. No `location.reload()`, `location.assign()` or `location.replace()` call exists in this extension. The code does not establish why the phone needs a fresh sign-in.
+
+### Test interpretation / stopgap
+
+Keep initiation disabled for ordinary chat use while diagnosis is pending. Updating and copying existing diagnostics does not require enabling it. For the requested controlled tests, set both interval fields to 240, daily photo budget to **0** (text-only), and both browser and Telegram notifications off. These controls are independent; no settings are automatically changed by this release.
+
+**240 minutes is not a one-attempt mode:** existing pending jobs, failure backoff, Fire now, and the 25-minute unanswered follow-up are separate from the ordinary interval. If performing a manual test, disable initiation immediately after the first failure/timeout and copy its trace; do not leave it enabled expecting the interval to suppress retries. A zero photo budget prevents photo generation, but the text adapter still participates in bridge ownership, so that test does not isolate every bridge interaction. Fresh short chat and all-other-extensions-off results must be interpreted separately.
+
+Validation: 129 Node tests pass, zero skipped, including pinned ST 1.19 source-contract checks. Added tests cover HTTP 200 errors, HTTP failures, network rejection, redaction, bounded diagnostics, unchanged successful responses, uncapped backoff at a 240-minute interval, timeout visibility, and fetch/settings restoration. The existing wake-coalescing regression also passes. No live Android, provider, or authenticated installation test was performed. Await the visible trace before another logic change.
 
 ## Chat access and reply recovery (0.1.15)
 
