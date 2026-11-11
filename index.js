@@ -1,8 +1,11 @@
-/* Ava Initiation 0.1.16 — visible attempt instrumentation for ST 1.19.0.
+/* Ava Initiation 0.1.17 — paused diagnostic recovery for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
 export const NAME = 'ava-initiation';
+// Recovery release: settings/diagnostics only, regardless of saved enable flags.
+export const RECOVERY_ONLY = true;
+export const RECOVERY_NOTICE = 'Recovery mode — initiations paused. Copy diagnostics below; no attempts will start.';
 export const MINUTE = 60000;
 export const DEADLINE = 150000;
 export const SULK_AFTER = 25 * MINUTE;
@@ -334,6 +337,7 @@ export function createEngine(d) {
     }
     function eligible(db, c) { return c && !c.group && c.avatar && c.chatId && db.config.enabled && db.config.allow[c.avatar] === true; }
     async function locked(work) {
+        if (d.paused?.()) { report(RECOVERY_NOTICE); return; }
         if (fatal) { report(fatal); return; }
         if (!d.locks?.request) { report('Paused: Web Locks unavailable. Duplicate-safe initiation needs a supported HTTPS PWA.'); return; }
         try {
@@ -375,6 +379,7 @@ export function createEngine(d) {
         save(db);
     }
     async function tick(manual = false, diagnostic = false) {
+        if (d.paused?.()) { report(RECOVERY_NOTICE); return; }
         if (running) { report('Waiting for the current initiation.'); return; }
         return locked(async () => {
             const c = d.active(); if (!c) return;
@@ -590,11 +595,13 @@ export function createEngine(d) {
         });
     }
     async function activate() {
+        if (d.paused?.()) { report(RECOVERY_NOTICE); return; }
         const c = d.active(), key = c ? chatKey(c) : null;
         if (current !== key) { running?.cancel('Chat changed.'); current = key; }
         return tick();
     }
     async function reply(messageId) {
+        if (d.paused?.()) return;
         const c = d.active();
         if (!c || !c.chat[messageId]?.is_user || c.chat[messageId]?.is_system) return;
         running?.cancel('User replied.');
@@ -612,6 +619,7 @@ export function createEngine(d) {
     return { tick, activate, reply, cancel: reason => running?.cancel(reason),
         get running() { return running; }, get fatal() { return fatal; },
         updateConfig: async value => {
+            if (d.paused?.()) { report(RECOVERY_NOTICE); return; }
             const config = validateConfig(value);
             if (!d.locks?.request) { report('Paused: Web Locks unavailable; settings cannot be changed safely.'); return; }
             return d.locks.request(d.lockName, async () => {
@@ -938,16 +946,20 @@ export async function bootPage() {
     const initialise = () => {
         if (!localStorage.getItem(dataKey)) localStorage.setItem(dataKey, JSON.stringify(initialDatabase(extension_settings[NAME] || DEFAULTS)));
     };
-    if (navigator.locks?.request) await navigator.locks.request(namespace, initialise); else initialise();
+    // Recovery reads existing local data without waiting on an old tab's lock.
+    const recoverySnapshot = RECOVERY_ONLY ? initialDatabase(extension_settings[NAME] || DEFAULTS) : null;
+    if (!RECOVERY_ONLY) {
+        if (navigator.locks?.request) await navigator.locks.request(namespace, initialise); else initialise();
+    }
     const legacyToken = localStorage.getItem(telegramTokenKey);
-    if (legacyToken && !telegramToken()) {
+    if (!RECOVERY_ONLY && legacyToken && !telegramToken()) {
         extension_settings[NAME] = { ...(extension_settings[NAME] || {}), telegramToken: legacyToken };
         host.saveSettingsDebounced();
     }
     // Keep the legacy copy until the server-saved settings return on a later load.
-    else if (legacyToken && telegramToken()) localStorage.removeItem(telegramTokenKey);
+    else if (!RECOVERY_ONLY && legacyToken && telegramToken()) localStorage.removeItem(telegramTokenKey);
     const bridge = () => globalThis[Symbol.for('ava.veniceBridge')];
-    let notice = '', notificationRegistration = null, notificationSetup = null, adapter = null;
+    let notice = RECOVERY_ONLY ? RECOVERY_NOTICE : '', notificationRegistration = null, notificationSetup = null, adapter = null;
     let notificationStatus = 'Notifications have not been set up. The unread badge remains available.';
     let telegramStatus = '';
     let browserNotificationsWanted = false;
@@ -1029,10 +1041,11 @@ export async function bootPage() {
         });
     }
     const engine = createEngine({
+        paused: () => RECOVERY_ONLY,
         uuid: () => crypto.randomUUID(), seed: () => crypto.getRandomValues(new Uint32Array(1))[0],
         random: () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296,
         now: () => Date.now(), locks: navigator.locks, lockName: namespace,
-        read: () => jsonRead(dataKey), write: db => localStorage.setItem(dataKey, JSON.stringify(db)),
+        read: () => jsonRead(dataKey) || recoverySnapshot, write: db => localStorage.setItem(dataKey, JSON.stringify(db)),
         readLease: () => jsonRead(leaseKey), writeLease: lease => localStorage.setItem(leaseKey, JSON.stringify(lease)),
         clearLease: () => localStorage.removeItem(leaseKey), active, hidden: () => document.hidden,
         targetCurrent: c => jsonRead(targetKey) === chatKey(c),
@@ -1142,8 +1155,9 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.16 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.17 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
+      <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; controls are locked in this recovery build.' : ''}</p>
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" data-setting="chatDiagnostics"> Show attempt diagnostics in chat</label>
       <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
@@ -1170,7 +1184,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.16 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.17 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1182,16 +1196,16 @@ export async function bootPage() {
             const db = engine.snapshot(), c = active(), key = c ? chatKey(c) : null;
             for (const el of panel.querySelectorAll('[data-setting]')) {
                 if (document.activeElement === el) continue;
-                const value = db.config[el.dataset.setting]; if (el.type === 'checkbox') el.checked = !!value; else el.value = value;
+                const value = RECOVERY_ONLY && el.dataset.setting === 'enabled' ? false : db.config[el.dataset.setting]; if (el.type === 'checkbox') el.checked = !!value; else el.value = value;
             }
-            const allow = panel.querySelector('#ava-allow'); allow.disabled = !c; allow.checked = !!(c && db.config.allow[c.avatar]);
+            const allow = panel.querySelector('#ava-allow'); allow.disabled = RECOVERY_ONLY || !c; allow.checked = !!(c && db.config.allow[c.avatar]);
             panel.querySelector('#ava-character').textContent = c?.name2 || 'a selected character';
             const unread = Object.values(db.chats).reduce((n, s) => n + (s.unread || 0), 0);
             panel.querySelector('#ava-unread').textContent = unread ? `(${unread} unread)` : '';
             floating.hidden = !unread; floating.textContent = `Ava · ${unread} unread`;
             const b = db.budget && Date.now() < db.budget.end ? db.budget : { attempts: 0, spent: 0 };
-            const photo = bridge()?.initiationVersion === 1 ? bridge().initiationStatus() : null;
-            const photoNote = !photo ? ' Photos need Venice Image Bridge 0.5.0.' : !photo.ready && !engine.running
+            const photo = !RECOVERY_ONLY && bridge()?.initiationVersion === 1 ? bridge().initiationStatus() : null;
+            const photoNote = RECOVERY_ONLY ? ' Photos paused in recovery mode.' : !photo ? ' Photos need Venice Image Bridge 0.5.0.' : !photo.ready && !engine.running
                 ? ' Enable this character in Venice Image Bridge and configure its reference portrait.' : photo.costUsd == null
                     ? ' Photos paused: refresh the editing catalogue to obtain a price.' : '';
             panel.querySelector('#ava-budget').textContent = `Today: ${b.attempts}/2 photo attempts; $${(b.spent / 1e6).toFixed(2)} reserved of $${db.config.creditUsd.toFixed(2)}.${photoNote}`;
@@ -1204,6 +1218,27 @@ export async function bootPage() {
             panel.querySelector('#ava-log').textContent = db.log.filter(r => !key || r.chat === key).slice(-25).reverse()
                 .map(r => `${r.timestamp} · ${r.type || 'slot'} · ${r.outcome}${r.tag ? ` · ${r.tag}` : ''}${r.errorName ? ` · ${r.errorName}` : ''}\n${r.text}`).join('\n\n');
         } catch (e) { panel.querySelector('#ava-status').textContent = `Paused: ${e.message}`; }
+    }
+    panel.querySelector('#ava-copy-trace').onclick = async () => {
+        const c = active(), key = c && chatKey(c);
+        const current = attemptTrace.rows().filter(r => !key || r.chat === key).map(formatAttemptTrace);
+        const previous = engine.snapshot().log.filter(r => (!key || r.chat === key) && ['failed', 'save-unconfirmed', 'delivery-warning'].includes(r.outcome)).slice(-10)
+            .map(r => formatAttemptTrace({ ...r, event: `stored-${r.outcome}`, retry: null, detail: r.text }));
+        const text = [...previous, ...current].join('\n') || 'No initiation failures or attempt events recorded in this browser.';
+        try { await navigator.clipboard.writeText(text); notice = 'Attempt diagnostics copied.'; }
+        catch { notice = 'Copy unavailable. Select the diagnostic text below.'; }
+        panel.querySelector('#ava-trace-copy').value = text; refresh();
+    };
+    if (RECOVERY_ONLY) {
+        // Return before wake-loop construction, generation/message hooks,
+        // notification setup or settings change handlers are registered.
+        for (const control of panel.querySelectorAll('input, select, button')) {
+            control.disabled = control.id !== 'ava-copy-trace';
+        }
+        const redraw = () => { refresh(); renderTrace(); };
+        host.eventSource.on(host.event_types.CHAT_CHANGED, redraw);
+        redraw();
+        return { engine, panel, refresh, recoveryOnly: true };
     }
     async function setupNotifications(requestPermission, enabled = engine.snapshot().config.browserNotifications) {
         // Capture the toggle synchronously, before its settings write acquires
@@ -1315,16 +1350,6 @@ export async function bootPage() {
             result.textContent = error.responseText ?? error.message;
             notificationDiagnostic('Telegram test did not deliver; see the API response beneath Send test.');
         } finally { button.disabled = false; }
-    };
-    panel.querySelector('#ava-copy-trace').onclick = async () => {
-        const c = active(), key = c && chatKey(c);
-        const current = attemptTrace.rows().filter(r => !key || r.chat === key).map(formatAttemptTrace);
-        const previous = engine.snapshot().log.filter(r => (!key || r.chat === key) && ['failed', 'save-unconfirmed', 'delivery-warning'].includes(r.outcome)).slice(-10)
-            .map(r => formatAttemptTrace({ ...r, event: `stored-${r.outcome}`, retry: null, detail: r.text }));
-        const text = [...previous, ...current].join('\n') || 'No initiation failures or attempt events recorded in this browser.';
-        try { await navigator.clipboard.writeText(text); notice = 'Attempt diagnostics copied.'; }
-        catch { notice = 'Copy unavailable. Select the diagnostic text below.'; }
-        panel.querySelector('#ava-trace-copy').value = text; refresh();
     };
     panel.querySelector('#ava-fire').onclick = async () => { await engine.tick(true); await rearm(); };
     panel.querySelector('#ava-read').onclick = async () => { await engine.markRead(); refresh(); };

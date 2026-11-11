@@ -1,6 +1,18 @@
-# Ava Initiation 0.1.16
+# Ava Initiation 0.1.17
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Paused recovery build (0.1.17)
+
+This release lets a globally disabled extension be loaded to retrieve diagnostics without resuming saved enabled/pending initiation state. `RECOVERY_ONLY` is true for the whole release: there is no UI action that resumes generation in 0.1.17. It is a diagnostic recovery build, not a repair of the underlying generation failure.
+
+Boot reads existing local state without acquiring the scheduler Web Lock, migrating credentials, writing settings, registering notification workers, constructing the wake loop or subscribing to generation/message events. It only registers a chat-change redraw for the diagnostic view. No stored jobs, leases, settings or logs are cleared. With no local scheduler data, a read-only snapshot of saved extension settings supplies the panel.
+
+The panel visibly says **Recovery mode — initiations paused**. Enable initiations is shown unchecked and locked; Fire now, notifications/test, photo and other settings controls are locked. **Copy attempt diagnostics** remains active, with a selectable text fallback. The engine also checks the pause before automatic/manual ticks, activation, reply handling, configuration changes and locked operations, as defense in depth.
+
+Validation: 131 Node tests pass, zero skipped, with pinned ST source checks. A new integration test executes the actual `bootPage` using stubbed DOM and ST module boundaries, starting with enabled=true, overdue work and notifications enabled. It proves that boot, twenty chat switches and copying stored errors perform no fetch, timer, lock acquisition, generation, notification registration or storage/settings write. A separate engine test exercises manual firing, ordinary ticks, configuration calls and replies while paused and verifies stored state is unchanged. This does not constitute a live Android test.
+
+Update this extension while it remains disabled in Manage extensions. After the update succeeds, close other SillyTavern tabs (older loaded copies are unaffected by a new build), enable the extension and reload. Confirm the panel shows **0.1.17** and the recovery notice, then copy diagnostics. Do not uninstall or clear browser storage: the earlier error records are local to that browser/profile. Await those records before changing the generation path again.
 
 ## Instrumentation only (0.1.16)
 
