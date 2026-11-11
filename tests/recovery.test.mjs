@@ -78,7 +78,7 @@ test('actual recovery boot and chat switches stay inert; diagnostics copy works 
     assert.equal(node('#ava-copy-trace').disabled, false);
     assert.equal(node('#ava-single-test').disabled, false);
     assert.equal(node('#ava-single-stop').disabled, true);
-    assert.deepEqual(handlers.map(x => x[0]), ['chat']);
+    assert.deepEqual(handlers.map(x => x[0]), ['chat', 'sent']);
     for (let i = 0; i < 20; i++) handlers[0][1]();
     await node('#ava-copy-trace').onclick();
     assert.match(copied, /Stored original failure/);

@@ -1,11 +1,11 @@
-/* Ava Initiation 0.1.19 — one verified text delivery test in recovery mode for ST 1.19.0.
+/* Ava Initiation 0.1.20 — one timed text delivery test in recovery mode for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
 export const NAME = 'ava-initiation';
 // Recovery release: automatic scheduling stays disabled regardless of saved enable flags.
 export const RECOVERY_ONLY = true;
-export const RECOVERY_NOTICE = 'Recovery mode — automatic initiations paused. Only Run one delivery test can start a test.';
+export const RECOVERY_NOTICE = 'Recovery mode — automatic initiations paused. Only Schedule one text test can arm a single timer.';
 export const MINUTE = 60000;
 export const DEADLINE = 150000;
 export const SULK_AFTER = 25 * MINUTE;
@@ -268,7 +268,7 @@ export function createSingleDiagnostic(d) {
     return {
         get busy() { return busy; }, get used() { return used(); },
         cancel: reason => cancelCurrent?.(reason),
-        async run() {
+        async run(expected = null) {
             if (busy || used()) { status('Diagnostic already reserved or completed. Copy its diagnostics; no retry will run.'); return; }
             if (!d.locks?.request) { status('Diagnostic blocked: Web Locks unavailable. Nothing sent.'); return; }
             busy = true;
@@ -276,9 +276,10 @@ export function createSingleDiagnostic(d) {
                 await d.locks.request(d.lockName, { ifAvailable: true }, async lock => {
                     if (!lock) { status('Diagnostic blocked: another tab owns the initiation lock. Nothing sent.'); return; }
                     if (used()) { status('Diagnostic already used in this browser. Nothing sent.'); return; }
+                    expected?.guard();
                     const c = d.active(), reason = d.blocked(c);
                     if (reason) { status(reason); return; }
-                    const id = d.uuid(), started = d.now(), deadline = started + DEADLINE;
+                    const id = expected?.id || d.uuid(), started = d.now(), deadline = started + DEADLINE;
                     const trace = (event, detail) => { try { d.trace({ timestamp: d.now(), chat: chatKey(c), attemptId: id,
                         type: 'question', retry: 0, event, detail: detail ? failureText(detail) : '' }); } catch { /* diagnostic only */ } };
                     // Fail closed if a durable reservation cannot be saved.
@@ -287,6 +288,7 @@ export function createSingleDiagnostic(d) {
                     let ended = false, cancelled = false, cancelWork = null, rejectCancel, timer;
                     const cancellation = new Promise((_, reject) => { rejectCancel = reject; });
                     const guard = () => {
+                        expected?.guard();
                         const current = d.active();
                         if (ended || cancelled || d.now() >= deadline || !current || chatKey(current) !== chatKey(c)
                             || current.chat !== c.chat || d.interrupted?.(c)) throw new Error('Diagnostic expired, cancelled, chat changed or composer became busy.');
@@ -323,6 +325,77 @@ export function createSingleDiagnostic(d) {
                 });
             } catch (error) { status(`Diagnostic could not start: ${failureText(error)}`); }
             finally { busy = false; }
+        },
+    };
+}
+
+// Explicitly armed, one-shot timer. No startup scheduling, recovery replay or
+// retry. The durable arm receipt is retained even after cancellation/reload.
+export function createTimedDiagnostic(d) {
+    let arming = false, pending = null, running = null, epoch = 0;
+    const used = () => { try { return !!d.readArm(); } catch { return true; } };
+    const status = text => { try { d.status(text); } catch { /* UI only */ } };
+    const changed = () => { try { d.changed?.(); } catch { /* UI only */ } };
+    const trace = (job, event, detail) => { try { d.trace({ timestamp: d.now(), chat: job.chat,
+        attemptId: job.id, type: 'question', retry: 0, event, detail: failureText(detail) }); } catch { /* diagnostic only */ } };
+    const guard = job => {
+        const c = d.active();
+        if (job.epoch !== epoch || !c || chatKey(c) !== job.chat || c.chat !== job.c.chat)
+            throw new Error('Timed test cancelled or chat changed.');
+        if (d.interrupted?.()) throw new Error('App backgrounded or composer became busy.');
+    };
+    return {
+        get busy() { return arming || !!pending || !!running; }, get used() { return used(); },
+        cancel(reason) {
+            if (!arming && !pending && !running) return;
+            epoch++;
+            if (pending) { d.clearTimer(pending.timer); trace(pending, 'timer-cancelled', reason); pending = null; }
+            if (running) { trace(running, 'timer-cancelled', reason); d.cancelRun(reason); }
+            status(`${reason} No automatic retry; any reserved test remains reserved.`); changed();
+        },
+        async arm() {
+            if (arming || pending || running || used()) { status('Timed test already reserved. Copy diagnostics; it will not run again.'); return; }
+            if (!d.locks?.request) { status('Timed test blocked: Web Locks unavailable. Nothing scheduled.'); return; }
+            const c = d.active(), reason = d.blocked(c);
+            if (reason) { status(reason); return; }
+            const job = { id: d.uuid(), c, chat: chatKey(c), epoch, timer: null };
+            arming = true; changed();
+            try {
+                await d.locks.request(d.lockName, { ifAvailable: true }, lock => {
+                    if (!lock) { status('Timed test blocked: another tab owns the initiation lock. Nothing scheduled.'); return; }
+                    if (used()) { status('Timed test already reserved in another tab. Nothing scheduled.'); return; }
+                    guard(job);
+                    const blocked = d.blocked(d.active());
+                    if (blocked) throw new Error(blocked);
+                    job.due = d.now() + MINUTE;
+                    d.writeArm({ id: job.id, chat: job.chat, armed: d.now(), due: job.due });
+                    pending = job;
+                    trace(job, 'timer-armed', 'One text test in 60 seconds. Stay in this chat with the app visible and composer empty. No automatic retry.');
+                    status('One text test scheduled in 60 seconds. Keep this chat open and visible; leave the composer empty.');
+                    job.timer = d.setTimer(async () => {
+                        if (pending !== job || job.epoch !== epoch) return;
+                        pending = null; running = job; changed();
+                        try {
+                            guard(job);
+                            const blocked = d.blocked(d.active());
+                            if (blocked) throw new Error(blocked);
+                            if (d.now() < job.due || d.now() > job.due + 15000)
+                                throw new Error('Timer missed its 15-second start window. Nothing sent.');
+                            trace(job, 'timer-fired', '60-second timer fired; entering the single verified text-delivery test.');
+                            await d.run({ id: job.id, guard: () => guard(job) });
+                        } catch (error) {
+                            trace(job, 'timer-cancelled', error);
+                            status(`Timed test stopped: ${failureText(error)} No retry will run.`);
+                        } finally {
+                            running = null;
+                            trace(job, 'timer-finished', 'One-shot timer ended. Automatic initiation remains paused.'); changed();
+                        }
+                    }, MINUTE);
+                });
+            } catch (error) {
+                if (pending === job) { d.clearTimer(job.timer); pending = null; }
+                trace(job, 'timer-blocked', error); status(`Could not schedule the test: ${failureText(error)} Nothing sent.`);
+            } finally { arming = false; changed(); }
         },
     };
 }
@@ -1258,16 +1331,16 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.19 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.20 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; automatic initiation controls are locked.' : ''}</p>
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" data-setting="chatDiagnostics"> Show attempt diagnostics in chat</label>
       <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
-      <button type="button" class="menu_button" id="ava-single-test">Run one delivery test</button>
-      <button type="button" class="menu_button" id="ava-single-stop" disabled>Stop diagnostic</button>
-      <p>This manual test generates one text initiation, adds it to the selected chat, saves it and verifies the server copy. Maximum one model request, 150 seconds, no retry, photo or initiation notification. Normal chat speech settings may read the delivered message aloud. It uses your connected model and may incur its normal text-generation cost. One test per browser profile; reloading does not reset it.</p>
-      <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. Failed attempts can retry indefinitely; a long interval is not a one-attempt mode. Set daily photo budget to 0 for text-only testing.</p>
+      <button type="button" class="menu_button" id="ava-single-test">Schedule one text test (60 seconds)</button>
+      <button type="button" class="menu_button" id="ava-single-stop" disabled>Cancel timed test</button>
+      <p>This button arms one 60-second timer, then generates one text initiation, adds it to the selected chat, saves it and verifies the server copy. Keep this chat visible and the composer empty. Switching chat, typing, backgrounding or closing the page cancels the test. Maximum one model request, 150 seconds after the timer fires, no retry, photo or initiation notification. Normal chat speech settings may read the delivered message aloud. It uses your connected model and may incur its normal text-generation cost. One timed test per browser profile; cancellation keeps the reservation. Reloading neither resets nor resumes it.</p>
+      <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. The legacy automatic scheduler remains paused. This timed test never retries and never generates a photo.</p>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
       <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
       <label>Maximum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="max"></label>
@@ -1290,7 +1363,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.19 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.20 · ST 1.19.0 · Recovery test only; backgrounded or suspended tests do not resume.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1341,15 +1414,16 @@ export async function bootPage() {
         for (const control of panel.querySelectorAll('input, select, button')) {
             control.disabled = control.id !== 'ava-copy-trace';
         }
-        const usedKey = `${namespace}:single-delivery-v1`;
+        const usedKey = `${namespace}:single-timed-delivery-v1`;
         const testButton = panel.querySelector('#ava-single-test'), stopButton = panel.querySelector('#ava-single-stop');
         const hasDraft = () => !!String(document.getElementById('send_textarea')?.value || '') || !!chats.hasPendingFileAttachment?.();
+        const blocked = c => !c ? 'Open a companion chat first. Nothing sent.' : document.hidden ? 'Keep this tab visible for the diagnostic. Nothing sent.'
+            : hasDraft() || host.isGenerating?.() || bridge()?.busy ? 'Finish the current reply and empty the composer before testing. Nothing sent.'
+                : jsonRead(leaseKey)?.expiresAt > Date.now() ? 'An earlier initiation lease is still active. Nothing sent.' : '';
         const single = createSingleDiagnostic({
             now: () => Date.now(), uuid: () => crypto.randomUUID(), locks: navigator.locks, lockName: namespace,
             active, readUsed: () => jsonRead(usedKey), writeUsed: value => localStorage.setItem(usedKey, JSON.stringify(value)),
-            blocked: c => !c ? 'Open a companion chat first. Nothing sent.' : document.hidden ? 'Keep this tab visible for the diagnostic. Nothing sent.'
-                : hasDraft() || host.isGenerating?.() || bridge()?.busy ? 'Finish the current reply and empty the composer before testing. Nothing sent.'
-                    : jsonRead(leaseKey)?.expiresAt > Date.now() ? 'An earlier initiation lease is still active. Nothing sent.' : '',
+            blocked,
             interrupted: () => document.hidden || hasDraft(),
             setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
             trace: row => attemptTrace.append(row),
@@ -1379,15 +1453,26 @@ export async function bootPage() {
                 } finally { b?.releaseInitiation?.(job.id); }
             },
         });
-        const redraw = () => { refresh(); renderTrace(); testButton.disabled = single.busy || single.used; stopButton.disabled = !single.busy; };
-        testButton.onclick = async () => { const work = single.run(); redraw(); try { await work; } finally { redraw(); } };
-        stopButton.onclick = () => { single.cancel('Stopped by Joe.'); redraw(); };
-        host.eventSource.on(host.event_types.CHAT_CHANGED, () => { single.cancel('Chat changed.'); redraw(); });
-        document.getElementById('send_textarea')?.addEventListener('input', () => { if (hasDraft()) single.cancel('User started typing.'); });
-        document.addEventListener('visibilitychange', () => { if (document.hidden) single.cancel('App backgrounded.'); });
-        window.addEventListener('pagehide', () => single.cancel('Page closed or suspended.'));
+        const armKey = `${namespace}:single-timed-arm-v1`;
+        const timed = createTimedDiagnostic({
+            now: () => Date.now(), uuid: () => crypto.randomUUID(), locks: navigator.locks, lockName: namespace,
+            active, blocked, interrupted: () => document.hidden || hasDraft(),
+            readArm: () => jsonRead(armKey), writeArm: value => localStorage.setItem(armKey, JSON.stringify(value)),
+            setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
+            trace: row => attemptTrace.append(row), status: text => { notice = text; refresh(); },
+            run: expected => single.run(expected), cancelRun: reason => single.cancel(reason), changed: () => redraw(),
+        });
+        const redraw = () => { refresh(); renderTrace(); testButton.disabled = timed.busy || timed.used || single.used; stopButton.disabled = !timed.busy; };
+        testButton.onclick = () => timed.arm();
+        stopButton.onclick = () => { timed.cancel('Stopped by Joe.'); redraw(); };
+        host.eventSource.on(host.event_types.CHAT_CHANGED, () => { timed.cancel('Chat changed.'); redraw(); });
+        host.eventSource.on(host.event_types.MESSAGE_SENT, () => timed.cancel('User sent a message.'));
+        document.getElementById('send_textarea')?.addEventListener('input', () => { if (hasDraft()) timed.cancel('User started typing.'); });
+        document.addEventListener('visibilitychange', () => { if (document.hidden) timed.cancel('App backgrounded.'); });
+        window.addEventListener('pagehide', () => timed.cancel('Page closed or suspended.'));
+        if (timed.used) notice = 'A timed test was already reserved in this browser. It will not resume or repeat. Copy attempt diagnostics.';
         redraw();
-        return { engine, panel, refresh, recoveryOnly: true, single };
+        return { engine, panel, refresh, recoveryOnly: true, single, timed };
     }
     async function setupNotifications(requestPermission, enabled = engine.snapshot().config.browserNotifications) {
         // Capture the toggle synchronously, before its settings write acquires

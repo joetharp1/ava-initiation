@@ -1,6 +1,22 @@
-# Ava Initiation 0.1.19
+# Ava Initiation 0.1.20
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## One timed delivery test (0.1.20)
+
+The phone tests on 11 November now establish two working paths: generation only returned 240 characters, and the manual delivery test returned 101 characters, rendered message 99, saved it, and verified its exact attempt ID and text on the server. Joe confirmed chats and ordinary replies still work. The delivery test took about 38 seconds, including about 11 seconds saving. These results do not establish the cause of the earlier automatic-scheduler failure.
+
+0.1.20 adds **Schedule one text test (60 seconds)**. Only that button arms a timer; extension startup and chat changes do not. After 60 seconds it uses the same single-request generation and verified delivery path. Automatic recurring initiations, photos, notifications and retries remain paused. Text generation can incur the usual model cost; normal TTS may speak the delivered message.
+
+A profile Web Lock serializes arming and execution across tabs. A new persistent `single-timed-arm-v1` receipt prevents another arm, even after cancellation or reload. `single-timed-delivery-v1` independently reserves the model attempt. Previous diagnostic receipts and logs are retained. Reload never resumes or resubmits this timer. A cancelled or interrupted test stays reserved for diagnosis; it does not silently retry.
+
+Switching chat, sending a message, typing a draft, backgrounding the app, page closure, or Cancel timed test stops the test. At firing, an occupied composer, pending attachment, active generation, bridge operation or existing initiation lease blocks it. A timer more than 15 seconds late is abandoned. The generation/delivery deadline is 150 seconds after firing. Late callbacks cannot start a second attempt or deliver into another chat. No interval or legacy wake loop is installed.
+
+Visible traces add `timer-armed`, `timer-fired`, `timer-cancelled`/`timer-blocked`, and `timer-finished`, with the same attempt ID used for generation and verified delivery. The saved receipt and bounded browser-local diagnostics survive reload within the same browser storage context.
+
+Validation: 154 Node tests pass, zero skipped, including pinned ST source checks. Timer coverage includes double-clicks, reload, cancellation, stale callbacks, wrong chat, busy/background state, delayed timers, storage failure, profile-lock races, and integration with the single generation/delivery runner.
+
+Phone acceptance: update/reload and confirm 0.1.20, select Ava's chat, empty the composer, press **Schedule one text test (60 seconds)** once, and keep that chat visible without typing. Allow the minute plus generation/save time. Copy attempt diagnostics afterwards, confirm the opening is fresh and ordinary chat still works. This timed phone test has not yet run; automatic scheduling must remain paused.
 
 ## One verified delivery test (0.1.19)
 
@@ -12,7 +28,7 @@ After generation, the test rejects a repeat of any of the last eight assistant m
 
 The same 150-second deadline covers the full test. Stop, typing, chat switching and page backgrounding still cancel it; the persistent reservation blocks another run after timeout, failure or reload. Cancellation/failure after insertion can leave an unconfirmed local message, or an in-flight save may still complete. The log explicitly reports unconfirmed delivery; the test neither deletes that message nor retries it. Automatic initiation remains paused after every outcome.
 
-Validation: 146 Node tests pass, zero skipped, with ST source checks enabled. New cases cover successful render/event/save/readback ordering, silent save failure, repeated/stale-history rejection, event/save/readback errors, cancellation between publication stages, one-time publication, and timeout/late-save handling without another generation. No live delivery test has yet run for 0.1.19.
+Validation: 146 Node tests pass, zero skipped, with ST source checks enabled. New cases cover successful render/event/save/readback ordering, silent save failure, repeated/stale-history rejection, event/save/readback errors, cancellation between publication stages, one-time publication, and timeout/late-save handling without another generation. Subsequent live delivery test passed on 11 November, with exact server readback and ordinary chat operation confirmed by Joe (see 0.1.20 above).
 
 Update/reload, confirm 0.1.19, select the intended companion chat and empty the composer. Press Run one delivery test once, keep the tab visible, and wait for the result (at most 150 seconds while the page stays responsive). A successful test adds one actual companion message. Copy attempt diagnostics afterwards; if the message appeared, also verify it remains after a reload. Do not resume automatic scheduling yet.
 
