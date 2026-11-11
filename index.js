@@ -1,11 +1,11 @@
-/* Ava Initiation 0.1.17 — paused diagnostic recovery for ST 1.19.0.
+/* Ava Initiation 0.1.18 — one manual text diagnostic in recovery mode for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
 export const NAME = 'ava-initiation';
-// Recovery release: settings/diagnostics only, regardless of saved enable flags.
+// Recovery release: automatic scheduling stays disabled regardless of saved enable flags.
 export const RECOVERY_ONLY = true;
-export const RECOVERY_NOTICE = 'Recovery mode — initiations paused. Copy diagnostics below; no attempts will start.';
+export const RECOVERY_NOTICE = 'Recovery mode — automatic initiations paused. Only Run one text-only diagnostic can start a test.';
 export const MINUTE = 60000;
 export const DEADLINE = 150000;
 export const SULK_AFTER = 25 * MINUTE;
@@ -220,6 +220,69 @@ export function createAttemptTrace({ read, write, changed = () => {} }) {
             rows = [...rows, entry].slice(-80);
             try { write(rows); } catch { /* retain an in-memory copy if storage fails */ }
             try { changed(); } catch { /* UI failure must not affect generation */ }
+        },
+    };
+}
+
+// A manually invoked diagnostic, separate from the scheduler. One persistent
+// reservation per browser profile prevents double taps, reload retries and
+// cross-tab repeats. It never publishes, notifies or schedules another attempt.
+export function createSingleDiagnostic(d) {
+    let busy = false, cancelCurrent = null;
+    const status = text => { try { d.status(text); } catch { /* UI only */ } };
+    const used = () => { try { return !!d.readUsed(); } catch { return true; } };
+    return {
+        get busy() { return busy; }, get used() { return used(); },
+        cancel: reason => cancelCurrent?.(reason),
+        async run() {
+            if (busy || used()) { status('Diagnostic already reserved or completed. Copy its diagnostics; no retry will run.'); return; }
+            if (!d.locks?.request) { status('Diagnostic blocked: Web Locks unavailable. Nothing sent.'); return; }
+            busy = true;
+            try {
+                await d.locks.request(d.lockName, { ifAvailable: true }, async lock => {
+                    if (!lock) { status('Diagnostic blocked: another tab owns the initiation lock. Nothing sent.'); return; }
+                    if (used()) { status('Diagnostic already used in this browser. Nothing sent.'); return; }
+                    const c = d.active(), reason = d.blocked(c);
+                    if (reason) { status(reason); return; }
+                    const id = d.uuid(), started = d.now(), deadline = started + DEADLINE;
+                    const trace = (event, detail) => { try { d.trace({ timestamp: d.now(), chat: chatKey(c), attemptId: id,
+                        type: 'question', retry: 0, event, detail: detail ? failureText(detail) : '' }); } catch { /* diagnostic only */ } };
+                    // Fail closed if a durable reservation cannot be saved.
+                    try { d.writeUsed({ id, chat: chatKey(c), started, deadline }); }
+                    catch (error) { trace('single-blocked', error); status('Could not reserve the diagnostic in browser storage. Nothing sent.'); return; }
+                    let ended = false, cancelled = false, cancelWork = null, rejectCancel, timer;
+                    const cancellation = new Promise((_, reject) => { rejectCancel = reject; });
+                    const guard = () => {
+                        const current = d.active();
+                        if (ended || cancelled || d.now() >= deadline || !current || chatKey(current) !== chatKey(c)
+                            || current.chat !== c.chat || d.interrupted?.(c)) throw new Error('Diagnostic expired, cancelled, chat changed or composer became busy.');
+                    };
+                    cancelCurrent = reason => {
+                        if (ended || cancelled) return;
+                        cancelled = true; trace('cancel', reason);
+                        try { cancelWork?.(); } catch (error) { trace('cancel-error', error); }
+                        rejectCancel(new Error(reason));
+                    };
+                    timer = d.setTimer(() => cancelCurrent?.('Diagnostic timed out after 150 seconds.'), DEADLINE);
+                    trace('single-start', 'One text generation maximum; no retries, photos, notifications or chat save.');
+                    status('Running one text-only diagnostic. Automatic initiation remains paused.');
+                    try {
+                        const work = d.execute({ id, c, deadline, guard, trace,
+                            onCancelReady: fn => { cancelWork = fn; if (cancelled) fn?.(); } });
+                        const text = await Promise.race([work, cancellation]);
+                        guard();
+                        trace('single-success', `Model returned ${String(text).length} characters of usable text. No companion message was saved by this diagnostic.`);
+                        status('Diagnostic succeeded at generation. Copy diagnostics; scheduling is still paused.');
+                    } catch (error) {
+                        trace('single-failed', error);
+                        status('Diagnostic stopped. Copy diagnostics; no retry will run.');
+                    } finally {
+                        ended = true; cancelCurrent = null; d.clearTimer(timer);
+                        trace('single-finished', 'Test ended. Automatic initiation remains paused; the one-test reservation is retained.');
+                    }
+                });
+            } catch (error) { status(`Diagnostic could not start: ${failureText(error)}`); }
+            finally { busy = false; }
         },
     };
 }
@@ -978,7 +1041,7 @@ export async function bootPage() {
         write: rows => localStorage.setItem(traceKey, JSON.stringify(rows)),
         changed: () => renderTrace() });
     function renderTrace() {
-        if (!engine.snapshot().config.chatDiagnostics) {
+        if (!RECOVERY_ONLY && !engine.snapshot().config.chatDiagnostics) {
             document.querySelectorAll('.ava-attempt-trace').forEach(el => el.remove()); return;
         }
         const c = active(), container = document.getElementById('chat');
@@ -1155,12 +1218,15 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.17 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.18 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
-      <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; controls are locked in this recovery build.' : ''}</p>
+      <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; automatic initiation controls are locked.' : ''}</p>
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" data-setting="chatDiagnostics"> Show attempt diagnostics in chat</label>
       <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
+      <button type="button" class="menu_button" id="ava-single-test">Run one text-only diagnostic</button>
+      <button type="button" class="menu_button" id="ava-single-stop" disabled>Stop diagnostic</button>
+      <p>This manual test checks the existing chat-read and generation path. Maximum one model request, 150 seconds, no retry, photo, notification or companion-message save. It uses your connected model and may incur its normal text-generation cost. One test per browser profile; reloading does not reset it.</p>
       <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. Failed attempts can retry indefinitely; a long interval is not a one-attempt mode. Set daily photo budget to 0 for text-only testing.</p>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
       <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
@@ -1184,7 +1250,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.17 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.18 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1235,10 +1301,52 @@ export async function bootPage() {
         for (const control of panel.querySelectorAll('input, select, button')) {
             control.disabled = control.id !== 'ava-copy-trace';
         }
-        const redraw = () => { refresh(); renderTrace(); };
-        host.eventSource.on(host.event_types.CHAT_CHANGED, redraw);
+        const usedKey = `${namespace}:single-diagnostic-v1`;
+        const testButton = panel.querySelector('#ava-single-test'), stopButton = panel.querySelector('#ava-single-stop');
+        const hasDraft = () => !!String(document.getElementById('send_textarea')?.value || '') || !!chats.hasPendingFileAttachment?.();
+        const single = createSingleDiagnostic({
+            now: () => Date.now(), uuid: () => crypto.randomUUID(), locks: navigator.locks, lockName: namespace,
+            active, readUsed: () => jsonRead(usedKey), writeUsed: value => localStorage.setItem(usedKey, JSON.stringify(value)),
+            blocked: c => !c ? 'Open a companion chat first. Nothing sent.' : document.hidden ? 'Keep this tab visible for the diagnostic. Nothing sent.'
+                : hasDraft() || host.isGenerating?.() || bridge()?.busy ? 'Finish the current reply and empty the composer before testing. Nothing sent.'
+                    : jsonRead(leaseKey)?.expiresAt > Date.now() ? 'An earlier initiation lease is still active. Nothing sent.' : '',
+            interrupted: () => document.hidden || hasDraft(),
+            setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
+            trace: row => attemptTrace.append(row),
+            status: text => { notice = text; refresh(); },
+            execute: async job => {
+                job.guard(); job.trace('chat-read-start', 'Checking server history; 12s read deadline.');
+                const saved = await readSavedChat(job.c, { headers: host.getRequestHeaders() });
+                job.guard(); assertCurrentHistory(saved, job.c.chat);
+                job.trace('chat-read-ok', 'Server and local history agree.');
+                const attempt = { ...job, type: 'question', sulk: false, history: '[]' };
+                attempt.history = await historyWithinTokens(engine.snapshot().log.filter(r => r.chat === chatKey(job.c)),
+                    text => job.c.getTokenCountAsync(text), 512, lastAssistantText(job.c.chat));
+                job.guard();
+                const b = bridge();
+                // Retain the existing text adapter's bridge ownership boundary,
+                // but never invoke image generation or the photo publisher.
+                try {
+                    b?.claimInitiation?.({ attemptId: job.id, onStop: () => single.cancel('Generation stopped.') });
+                    return await stageNormal({ host, tools: tc.ToolManager, c: job.c, attempt,
+                        instruction: openingInstruction(attempt, lastAssistantText(job.c.chat)),
+                        onTrace: job.trace, onCancelReady: job.onCancelReady,
+                        // Existing diagnostic boundary rejects any second model
+                        // POST before dispatch, even if ST requests a follow-up.
+                        onDiagnostic: () => job.trace('request-checked', 'Single model-request boundary passed.'),
+                    });
+                } finally { b?.releaseInitiation?.(job.id); }
+            },
+        });
+        const redraw = () => { refresh(); renderTrace(); testButton.disabled = single.busy || single.used; stopButton.disabled = !single.busy; };
+        testButton.onclick = async () => { const work = single.run(); redraw(); try { await work; } finally { redraw(); } };
+        stopButton.onclick = () => { single.cancel('Stopped by Joe.'); redraw(); };
+        host.eventSource.on(host.event_types.CHAT_CHANGED, () => { single.cancel('Chat changed.'); redraw(); });
+        document.getElementById('send_textarea')?.addEventListener('input', () => { if (hasDraft()) single.cancel('User started typing.'); });
+        document.addEventListener('visibilitychange', () => { if (document.hidden) single.cancel('App backgrounded.'); });
+        window.addEventListener('pagehide', () => single.cancel('Page closed or suspended.'));
         redraw();
-        return { engine, panel, refresh, recoveryOnly: true };
+        return { engine, panel, refresh, recoveryOnly: true, single };
     }
     async function setupNotifications(requestPermission, enabled = engine.snapshot().config.browserNotifications) {
         // Capture the toggle synchronously, before its settings write acquires

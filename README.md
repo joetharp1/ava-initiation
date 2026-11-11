@@ -1,6 +1,22 @@
-# Ava Initiation 0.1.17
+# Ava Initiation 0.1.18
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## One manual text diagnostic (0.1.18)
+
+Automatic initiation remains disabled by `RECOVERY_ONLY`. The recovery panel now exposes **Run one text-only diagnostic** and **Stop diagnostic** alongside Copy attempt diagnostics. Loading, changing chats, elapsed time, and old enabled/pending settings cannot start this test.
+
+The explicit button acquires the existing profile Web Lock without waiting, checks the selected chat, visible page, composer, active generation, bridge and old attempt lease, and persists a separate one-test reservation before doing work. Double taps and another tab/reload sharing this profile cannot repeat the test. Failed reservation storage blocks the request. Incognito storage is separate from normal browsing and may disappear when its session ends; keep the diagnostic tab open until the trace is copied.
+
+The test follows the existing server-chat read/comparison, recent-initiation history, bridge ownership, private opening instruction and `stageNormal` request adapter. It makes at most **one model POST**, with the existing request-boundary guard rejecting a second request before dispatch. It retains the 12-second chat-read timeout and 150-second overall deadline. It does not use scheduler tick, failure backoff, network retries, repeat retries, photo generation, notifications, or chat publication/save. Results are reported as diagnostic success/failure, not as a delivered companion initiation. Consequently, success checks only the read/generation path; it does not validate automatic scheduling or saving an initiation.
+
+Starting to type, changing chats, backgrounding/closing the page, pressing Stop diagnostic, or the deadline cancels the test. It calls only the adapter's owned cancellation callback; normal generation and cancellation implementation is otherwise unchanged. This remains a diagnostic of the suspected generation path, not proof that its underlying UI interference is fixed. A late response cannot publish a message, and no automatic retry is armed.
+
+Test traces are plain text, bounded and copyable, displayed in recovery mode even if the earlier diagnostics-display preference was off. Scheduler configuration and previous logs are retained. The only new persisted execution state is the diagnostic reservation and its trace. Keep Enable initiations unchecked/locked; the manual button is the only route to a test.
+
+Validation: 139 Node tests pass, zero skipped, including actual recovery boot with stubbed DOM/ST boundaries, double-click and reload exclusion, cross-tab reservation recheck, failed storage, busy-lock/composer refusal, network failure without retry, timeout, cancellation before a delayed chat read completes, chat switching, and rejection of a second model POST by the real adapter. No live provider/Android test was performed. The manual test uses the selected paid/free chat connection at its usual text-generation rate; it does not generate paid images.
+
+Update/reload, check 0.1.18, select the intended companion chat and leave its composer empty. Press Run one text-only diagnostic once, keep the tab visible, and use Stop diagnostic if it becomes sluggish. After it ends (at most 150 seconds while the page remains responsive), Copy attempt diagnostics and share that result before any further code changes. Automatic initiation remains paused afterwards.
 
 ## Paused recovery build (0.1.17)
 

@@ -36,6 +36,7 @@ test('actual recovery boot and chat switches stay inert; diagnostics copy works 
     class Node {
         constructor(id = '') { this.id = id; this.children = []; this.isConnected = true; this.dataset = {}; this.type = ''; }
         append(x) { this.children.push(x); }
+        addEventListener() {}
         setAttribute() {}
         remove() {}
         querySelector(q) { return node(q); }
@@ -52,7 +53,7 @@ test('actual recovery boot and chat switches stay inert; diagnostics copy works 
         crypto: { randomUUID: () => 'uuid', getRandomValues: x => x.fill(1) },
         navigator: { locks: { request: forbidden('lock') }, clipboard: { writeText: async text => { copied = text; } }, serviceWorker: { register: forbidden('worker') } },
         localStorage: { getItem: k => storage.get(k) ?? null, setItem: forbidden('storage-write'), removeItem: forbidden('storage-remove') },
-        document: { getElementById: id => node('#' + id), createElement: () => new Node(), querySelectorAll: () => [], body: new Node(), activeElement: null },
+        document: { addEventListener() {}, getElementById: id => node('#' + id), createElement: () => new Node(), querySelectorAll: () => [], body: new Node(), activeElement: null },
         fetch: forbidden('fetch'), setTimeout: forbidden('timer'), clearTimeout() {},
     });
     const modules = {
@@ -69,11 +70,14 @@ test('actual recovery boot and chat switches stay inert; diagnostics copy works 
             await mod.link(() => {}); await mod.evaluate(); return mod;
         } });
     await module.link(() => {}); await module.evaluate();
+    sandbox.window = { addEventListener() {} };
     const result = await module.namespace.bootPage();
     assert.equal(result.recoveryOnly, true);
     assert.equal(enabled.checked, false); assert.equal(enabled.disabled, true);
     assert.equal(node('#ava-fire').disabled, true); assert.equal(node('#ava-telegram-test').disabled, true);
     assert.equal(node('#ava-copy-trace').disabled, false);
+    assert.equal(node('#ava-single-test').disabled, false);
+    assert.equal(node('#ava-single-stop').disabled, true);
     assert.deepEqual(handlers.map(x => x[0]), ['chat']);
     for (let i = 0; i < 20; i++) handlers[0][1]();
     await node('#ava-copy-trace').onclick();
