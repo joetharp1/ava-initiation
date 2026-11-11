@@ -1,6 +1,16 @@
-# Ava Initiation 0.1.20
+# Ava Initiation 0.1.21
 
 Unprompted character messages for SillyTavern 1.19.0. Client-side, no build step or external runtime dependencies. The two runtime files are `manifest.json` and `index.js`.
+
+## Fresh timed-test reservation (0.1.21)
+
+The 0.1.20 phone test armed at 03:54:08 UTC on 11 November and fired at 03:55:08 as intended. It made one model request. Context preparation took about 53 seconds; the request started at 03:56:02. The browser reported backgrounding at 03:56:20, and the diagnostic cancelled the request and finished without retrying. No response or delivered message was established by this run. The cancellation was expected foreground-test behaviour; the earlier recurring-scheduler failure remains unexplained.
+
+0.1.21 provides one fresh manually armed timed test using `single-timed-arm-v2` and `single-timed-delivery-v2`. It preserves the first trial's receipts and logs. Generation, delivery, timeouts, cancellation, locks and scheduler pause are unchanged. No automatic work runs on updating or loading.
+
+Phone test: update/reload to 0.1.21, select Ava's chat with an empty composer, and press Schedule one text test (60 seconds) once. Keep SillyTavern visible and the screen awake until its status says delivered or stopped; allow up to four minutes. Only then copy diagnostics and switch apps. A one-minute timer plus the 150-second generation/delivery deadline can take three and a half minutes. The previous instruction to allow roughly two minutes was too short for this observed slow context preparation.
+
+Validation: existing 154 Node tests pass, zero skipped, including pinned ST source checks. This release only changes version labels, the one-use reservation keys, and explanatory copy; no scheduler or generation logic changes. Live completion of this fresh timed trial is pending.
 
 ## One timed delivery test (0.1.20)
 
@@ -16,7 +26,7 @@ Visible traces add `timer-armed`, `timer-fired`, `timer-cancelled`/`timer-blocke
 
 Validation: 154 Node tests pass, zero skipped, including pinned ST source checks. Timer coverage includes double-clicks, reload, cancellation, stale callbacks, wrong chat, busy/background state, delayed timers, storage failure, profile-lock races, and integration with the single generation/delivery runner.
 
-Phone acceptance: update/reload and confirm 0.1.20, select Ava's chat, empty the composer, press **Schedule one text test (60 seconds)** once, and keep that chat visible without typing. Allow the minute plus generation/save time. Copy attempt diagnostics afterwards, confirm the opening is fresh and ordinary chat still works. This timed phone test has not yet run; automatic scheduling must remain paused.
+Phone acceptance: update/reload and confirm 0.1.20, select Ava's chat, empty the composer, press **Schedule one text test (60 seconds)** once, and keep that chat visible without typing. Allow the minute plus generation/save time. Copy attempt diagnostics afterwards, confirm the opening is fresh and ordinary chat still works. This timed phone test subsequently fired correctly and was cancelled on backgrounding before a response (see 0.1.21 above); automatic scheduling remains paused.
 
 ## One verified delivery test (0.1.19)
 

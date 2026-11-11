@@ -1,4 +1,4 @@
-/* Ava Initiation 0.1.20 — one timed text delivery test in recovery mode for ST 1.19.0.
+/* Ava Initiation 0.1.21 — one timed text delivery test in recovery mode for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
@@ -1331,7 +1331,7 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.20 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.21 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; automatic initiation controls are locked.' : ''}</p>
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
@@ -1339,7 +1339,7 @@ export async function bootPage() {
       <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
       <button type="button" class="menu_button" id="ava-single-test">Schedule one text test (60 seconds)</button>
       <button type="button" class="menu_button" id="ava-single-stop" disabled>Cancel timed test</button>
-      <p>This button arms one 60-second timer, then generates one text initiation, adds it to the selected chat, saves it and verifies the server copy. Keep this chat visible and the composer empty. Switching chat, typing, backgrounding or closing the page cancels the test. Maximum one model request, 150 seconds after the timer fires, no retry, photo or initiation notification. Normal chat speech settings may read the delivered message aloud. It uses your connected model and may incur its normal text-generation cost. One timed test per browser profile; cancellation keeps the reservation. Reloading neither resets nor resumes it.</p>
+      <p>This button arms one 60-second timer, then generates one text initiation, adds it to the selected chat, saves it and verifies the server copy. Keep this chat visible and the composer empty until the status says delivered or stopped (allow up to four minutes). Copy diagnostics only afterwards; switching to another app cancels the test. Switching chat, typing, backgrounding or closing the page cancels the test. Maximum one model request, 150 seconds after the timer fires, no retry, photo or initiation notification. Normal chat speech settings may read the delivered message aloud. It uses your connected model and may incur its normal text-generation cost. One timed test per browser profile; cancellation keeps the reservation. Reloading neither resets nor resumes it.</p>
       <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. The legacy automatic scheduler remains paused. This timed test never retries and never generates a photo.</p>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
       <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
@@ -1363,7 +1363,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.20 · ST 1.19.0 · Recovery test only; backgrounded or suspended tests do not resume.</small>
+      <small>0.1.21 · ST 1.19.0 · Recovery test only; backgrounded or suspended tests do not resume.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1414,7 +1414,7 @@ export async function bootPage() {
         for (const control of panel.querySelectorAll('input, select, button')) {
             control.disabled = control.id !== 'ava-copy-trace';
         }
-        const usedKey = `${namespace}:single-timed-delivery-v1`;
+        const usedKey = `${namespace}:single-timed-delivery-v2`;
         const testButton = panel.querySelector('#ava-single-test'), stopButton = panel.querySelector('#ava-single-stop');
         const hasDraft = () => !!String(document.getElementById('send_textarea')?.value || '') || !!chats.hasPendingFileAttachment?.();
         const blocked = c => !c ? 'Open a companion chat first. Nothing sent.' : document.hidden ? 'Keep this tab visible for the diagnostic. Nothing sent.'
@@ -1453,7 +1453,7 @@ export async function bootPage() {
                 } finally { b?.releaseInitiation?.(job.id); }
             },
         });
-        const armKey = `${namespace}:single-timed-arm-v1`;
+        const armKey = `${namespace}:single-timed-arm-v2`;
         const timed = createTimedDiagnostic({
             now: () => Date.now(), uuid: () => crypto.randomUUID(), locks: navigator.locks, lockName: namespace,
             active, blocked, interrupted: () => document.hidden || hasDraft(),
