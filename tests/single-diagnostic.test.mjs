@@ -100,3 +100,24 @@ test('real generation adapter blocks a second model request before fetch dispatc
         assert.equal(requests, 1); assert.equal(settings.stream_openai, true);
     } finally { globalThis.fetch = original; globalThis.document = previousDocument; }
 });
+
+test('optional publication completes before single-success and never repeats', async () => {
+    let publications = 0;
+    const f = fixture({ publish: async (job, text) => { job.guard(); assert.equal(text, 'A new opening'); publications++; } });
+    await f.single.run(); await f.single.run();
+    assert.equal(publications, 1); assert.equal(f.calls.run, 1);
+    assert.match(f.rows.find(r => r.event === 'single-success').detail, /server save verified/);
+});
+
+test('publication rejection or timeout fails once without starting another generation', async () => {
+    const failed = fixture({ publish: async () => { throw Error('save unconfirmed'); } });
+    await failed.single.run(); await failed.single.run();
+    assert.equal(failed.calls.run, 1); assert.equal(failed.rows.some(r => r.event === 'single-success'), false);
+    assert.match(failed.rows.find(r => r.event === 'single-failed').detail, /save unconfirmed/);
+    let resolveSave;
+    const timed = fixture({ publish: () => new Promise(r => { resolveSave = r; }) });
+    const work = timed.single.run(); await turn(); timed.advance(DEADLINE); [...timed.timers.values()][0].fn(); await work;
+    resolveSave(); await turn();
+    assert.equal(timed.rows.some(r => r.event === 'single-success'), false); assert.equal(timed.timers.size, 0);
+    await timed.single.run(); assert.equal(timed.calls.run, 1);
+});

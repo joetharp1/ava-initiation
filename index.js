@@ -1,11 +1,11 @@
-/* Ava Initiation 0.1.18 — one manual text diagnostic in recovery mode for ST 1.19.0.
+/* Ava Initiation 0.1.19 — one verified text delivery test in recovery mode for ST 1.19.0.
  * This module is also its own notification-only service worker. No ST import
  * executes in a worker. No caching, push subscription or background generation.
  */
 export const NAME = 'ava-initiation';
 // Recovery release: automatic scheduling stays disabled regardless of saved enable flags.
 export const RECOVERY_ONLY = true;
-export const RECOVERY_NOTICE = 'Recovery mode — automatic initiations paused. Only Run one text-only diagnostic can start a test.';
+export const RECOVERY_NOTICE = 'Recovery mode — automatic initiations paused. Only Run one delivery test can start a test.';
 export const MINUTE = 60000;
 export const DEADLINE = 150000;
 export const SULK_AFTER = 25 * MINUTE;
@@ -226,7 +226,41 @@ export function createAttemptTrace({ read, write, changed = () => {} }) {
 
 // A manually invoked diagnostic, separate from the scheduler. One persistent
 // reservation per browser profile prevents double taps, reload retries and
-// cross-tab repeats. It never publishes, notifies or schedules another attempt.
+// cross-tab repeats. Publication is optional; no notifications or later attempts are scheduled.
+export async function publishDiagnosticText({ job, text, host, readChat = readSavedChat, now = Date.now }) {
+    const { c, guard, trace, id } = job;
+    guard();
+    if (typeof text !== 'string' || !text.trim()) throw new Error('No text available to deliver. Nothing added.');
+    if (c.chat.some(m => m.extra?.ava_initiation?.attemptId === id)) throw new Error('This test already has a local message. No duplicate added.');
+    const previous = c.chat.filter(m => !m.is_user && !m.is_system && m.mes?.trim()).slice(-8);
+    if (previous.some(m => repeatsOpening(text, m.mes))) throw new Error('Repeated opening withheld. This test will not generate a replacement.');
+    trace('delivery-read-start', 'Rechecking server history before adding the generated text; 12s read deadline.');
+    const before = await readChat(c, { headers: host.getRequestHeaders() });
+    guard(); assertCurrentHistory(before, c.chat);
+    const stamp = now(), message = { name: c.name2, is_user: false, is_system: false, send_date: stamp, mes: text,
+        extra: { ava_initiation: { attemptId: id, type: 'question', timestamp: stamp, diagnosticDelivery: true } } };
+    c.chat.push(message); const messageId = c.chat.length - 1;
+    trace('text-publish-start', `Adding one opening at message ${messageId}.`);
+    try {
+        c.addOneMessage(message);
+        guard();
+        await host.eventSource.emit(host.event_types.MESSAGE_RECEIVED, messageId, 'extension');
+        trace('message-received-event-done', 'Message-received handlers completed.');
+        guard();
+        await host.eventSource.emit(host.event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'extension');
+        trace('message-rendered-event-done', 'Character-message handlers completed.');
+        guard(); trace('chat-save-start', 'Saving the delivered opening.');
+        await c.saveChat();
+        guard(); trace('chat-verify-start', 'Reading back the saved opening; 12s read deadline.');
+        const saved = await readChat(c, { headers: host.getRequestHeaders() });
+        guard(); assertSavedDelivery(saved, message);
+        trace('text-delivered', `Message ${messageId} saved and verified by exact attempt ID and text.`);
+    } catch (error) {
+        trace('delivery-unconfirmed', `A local message was added, but delivery is not confirmed: ${failureText(error)}`);
+        throw error;
+    }
+}
+
 export function createSingleDiagnostic(d) {
     let busy = false, cancelCurrent = null;
     const status = text => { try { d.status(text); } catch { /* UI only */ } };
@@ -264,15 +298,21 @@ export function createSingleDiagnostic(d) {
                         rejectCancel(new Error(reason));
                     };
                     timer = d.setTimer(() => cancelCurrent?.('Diagnostic timed out after 150 seconds.'), DEADLINE);
-                    trace('single-start', 'One text generation maximum; no retries, photos, notifications or chat save.');
-                    status('Running one text-only diagnostic. Automatic initiation remains paused.');
+                    trace('single-start', d.publish ? 'One text generation and one verified chat delivery; no retries, photos or initiation notifications.' : 'One text generation maximum; no retries, photos, notifications or chat save.');
+                    status(d.publish ? 'Running one delivery test. Automatic initiation remains paused.' : 'Running one text-only diagnostic. Automatic initiation remains paused.');
                     try {
-                        const work = d.execute({ id, c, deadline, guard, trace,
-                            onCancelReady: fn => { cancelWork = fn; if (cancelled) fn?.(); } });
+                        const job = { id, c, deadline, guard, trace,
+                            onCancelReady: fn => { cancelWork = fn; if (cancelled) fn?.(); } };
+                        const work = (async () => {
+                            const text = await d.execute(job);
+                            guard();
+                            if (d.publish) { await d.publish(job, text); guard(); }
+                            return text;
+                        })();
                         const text = await Promise.race([work, cancellation]);
                         guard();
-                        trace('single-success', `Model returned ${String(text).length} characters of usable text. No companion message was saved by this diagnostic.`);
-                        status('Diagnostic succeeded at generation. Copy diagnostics; scheduling is still paused.');
+                        trace('single-success', d.publish ? `Delivered ${String(text).length} characters; server save verified.` : `Model returned ${String(text).length} characters of usable text. No companion message was saved by this diagnostic.`);
+                        status(d.publish ? 'Text delivered and server save verified. Copy diagnostics; scheduling is still paused.' : 'Diagnostic succeeded at generation. Copy diagnostics; scheduling is still paused.');
                     } catch (error) {
                         trace('single-failed', error);
                         status('Diagnostic stopped. Copy diagnostics; no retry will run.');
@@ -1218,15 +1258,15 @@ export async function bootPage() {
       #ava-initiation-settings p{overflow-wrap:anywhere;}#ava-unread{display:inline-block;font-weight:bold;}
       #ava-initiation-settings .ava-log{white-space:pre-wrap;font-size:.85em;max-height:160px;overflow:auto;}
       #ava-unread-float{position:fixed;right:12px;bottom:95px;z-index:2000;min-height:44px;max-width:80vw;padding:10px;border-radius:12px;background:#324958;color:white;}
-    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.18 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    </style><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Ava Initiation · 0.1.19 <span id="ava-unread"></span></b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content"><div class="ava-body">
       <p id="ava-recovery-notice" role="status">${RECOVERY_ONLY ? RECOVERY_NOTICE + ' Saved settings and logs are retained; automatic initiation controls are locked.' : ''}</p>
       <label><input type="checkbox" data-setting="enabled"> Enable initiations</label>
       <label><input type="checkbox" data-setting="chatDiagnostics"> Show attempt diagnostics in chat</label>
       <button type="button" class="menu_button" id="ava-copy-trace">Copy attempt diagnostics</button>
-      <button type="button" class="menu_button" id="ava-single-test">Run one text-only diagnostic</button>
+      <button type="button" class="menu_button" id="ava-single-test">Run one delivery test</button>
       <button type="button" class="menu_button" id="ava-single-stop" disabled>Stop diagnostic</button>
-      <p>This manual test checks the existing chat-read and generation path. Maximum one model request, 150 seconds, no retry, photo, notification or companion-message save. It uses your connected model and may incur its normal text-generation cost. One test per browser profile; reloading does not reset it.</p>
+      <p>This manual test generates one text initiation, adds it to the selected chat, saves it and verifies the server copy. Maximum one model request, 150 seconds, no retry, photo or initiation notification. Normal chat speech settings may read the delivered message aloud. It uses your connected model and may incur its normal text-generation cost. One test per browser profile; reloading does not reset it.</p>
       <p>Diagnostic lines are kept on this browser (last 80 events; last 20 shown per chat). They are excluded from companion context and speech. Failed attempts can retry indefinitely; a long interval is not a one-attempt mode. Set daily photo budget to 0 for text-only testing.</p>
       <label><input type="checkbox" id="ava-allow"> Allow <span id="ava-character">this character</span></label>
       <label>Minimum minutes <input class="text_pole" type="number" min="1" max="10080" data-setting="min"></label>
@@ -1250,7 +1290,7 @@ export async function bootPage() {
       <p id="ava-status" role="status"></p><p id="ava-notifications"></p>
       <details><summary>Notification diagnostics</summary><div class="ava-log" id="ava-notification-log"></div></details>
       <details><summary>Recent initiation log</summary><div class="ava-log" id="ava-log"></div></details>
-      <small>0.1.18 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
+      <small>0.1.19 · ST 1.19.0 · Runs while the PWA is open; suspended timers reconcile on return.</small>
     </div></div></div>`;
     document.getElementById('extensions_settings')?.append(panel);
     panel.querySelector('#ava-telegram-token').value = telegramToken();
@@ -1301,7 +1341,7 @@ export async function bootPage() {
         for (const control of panel.querySelectorAll('input, select, button')) {
             control.disabled = control.id !== 'ava-copy-trace';
         }
-        const usedKey = `${namespace}:single-diagnostic-v1`;
+        const usedKey = `${namespace}:single-delivery-v1`;
         const testButton = panel.querySelector('#ava-single-test'), stopButton = panel.querySelector('#ava-single-stop');
         const hasDraft = () => !!String(document.getElementById('send_textarea')?.value || '') || !!chats.hasPendingFileAttachment?.();
         const single = createSingleDiagnostic({
@@ -1314,6 +1354,7 @@ export async function bootPage() {
             setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: id => clearTimeout(id),
             trace: row => attemptTrace.append(row),
             status: text => { notice = text; refresh(); },
+            publish: (job, text) => publishDiagnosticText({ job, text, host }),
             execute: async job => {
                 job.guard(); job.trace('chat-read-start', 'Checking server history; 12s read deadline.');
                 const saved = await readSavedChat(job.c, { headers: host.getRequestHeaders() });
