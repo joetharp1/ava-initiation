@@ -61,9 +61,9 @@ export function recoverRowKeys(snapshot,chat) {
     const msgs=snapshot.params?.messages?.filter(m=>['user','assistant'].includes(m.role)&&typeof m.content==='string')||[];
     const tail=msgs.slice(-2);
     if(tail.length<2)return null;
-    const hits=[];
-    for(let i=1;i<chat.rows.length;i++){
-        if(tail.every((m,j)=>{const r=chat.rows[i-1+j];return !r.is_system && (r.is_user?'user':'assistant')===m.role && r.mes===m.content;}))hits.push(i);
+    const hits=[], visible=chat.rows.map((r,index)=>({r,index})).filter(({r})=>!r.is_system&&r.mes?.trim());
+    for(let i=1;i<visible.length;i++){
+        if(tail.every((m,j)=>{const r=visible[i-1+j].r;return (r.is_user?'user':'assistant')===m.role && r.mes===m.content;}))hits.push(visible[i].index);
     }
     return hits.length===1?rowKeys(chat.rows.slice(0,hits[0]+1)):null;
 }

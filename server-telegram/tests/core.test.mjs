@@ -53,6 +53,8 @@ test('captured history accepts append-only follow-ups, but rejects edits and tru
  const old={chatHash:'old',params:{messages:[{role:'user',content:'Hi'},{role:'assistant',content:'Hello'}]}};
  assert.deepEqual(recoverRowKeys(old,{hash:'new',rows:[...rows,{is_user:true,mes:'Next'}]}),rowKeys(rows));
  assert.equal(recoverRowKeys(old,{hash:'new',rows:[...rows,...rows]}),null);
+ const withTool=[rows[0],{is_user:false,mes:'',extra:{tool_invocations:[{name:'Fixture'}]}},rows[1]];
+ assert.deepEqual(recoverRowKeys(old,{hash:'new',rows:withTool}),rowKeys(withTool));
  assert.deepEqual(parseInitiation('{"text":"Hello again","imagePrompt":null}'),{text:'Hello again',imagePrompt:null});
  assert.throws(()=>parseInitiation('{bad json'));assert.throws(()=>parseInitiation('{"text":""}'));
 });
