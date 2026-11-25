@@ -3,6 +3,8 @@
 VPS: 2117771. Existing project `sillytavern-jjhy`; worker project `astra-initiation`.
 Initial pinned runtime commit: `50bc5eff72f65de9de9d8a60f1eb8c920b196059` on branch `server-telegram-2026-11-25` in `joetharp1/ava-initiation`.
 
+Current runtime commit: `845aa073f94b05158dbb5125ac5d404910ec74c2`. This fixes a false repeat match caused by empty image-only assistant turns. Nine local tests pass. Live Telegram delivery was confirmed by the API at 04:57:20 UTC on 25 November; chat import and user receipt confirmation are still pending at this note's timestamp.
+
 The Compose definition is `deployment.json`, excluding its private environment. Deployment reuses the existing private ADMIN_USERNAME / ADMIN_PASSWORD environment in Hostinger. Never copy that environment into this repository or a handover file.
 
 Worker sources download from the pinned commit, are checked with SHA-256, and cache in its state volume for offline restarts. State volume is `astra-initiation_state`. Existing data volume is `sillytavern-jjhy_sillytavern-data`, read-only in the worker. Only the installer mounts it writable, to add the new client extension and back up the settings file into the state volume. Existing client versions back up before replacement.
