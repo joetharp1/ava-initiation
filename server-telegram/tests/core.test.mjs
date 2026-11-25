@@ -19,6 +19,7 @@ test('exact and close repeats rejected, fresh text accepted',()=>{
  assert(repeatText('How was your day?',['How was your day?']));
  assert(repeatText('I was thinking about that little cafe we talked about and wondered whether you fancied visiting.',['I was thinking about that little cafe we talked about and wondered whether you fancied visiting tomorrow.']));
  assert(!repeatText('I found a new book that reminded me of our conversation.',['How was your day?']));
+ assert(!repeatText('I found a new book that reminded me of our conversation.',['','I','Hi','A photo.']));
 });
 test('no second outstanding initiation, daily cap, and explicit test bypasses quiet hours',()=>{
  const now=Date.parse('2026-11-25T04:00:00Z');const t={enabled:true,snapshot:{},nextAt:now-1,quietStart:'23:00',quietEnd:'08:00'};

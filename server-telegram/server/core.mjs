@@ -17,10 +17,11 @@ export function repeatText(text, previous) {
     const norm = s => String(s).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
     const a = norm(text);
     return previous.some(p => {
-        const b=norm(p); if(a===b || (a.length>35 && (b.includes(a)||a.includes(b)))) return true;
+        const b=norm(p); if(!b)return false;
+        if(a===b || (Math.min(a.length,b.length)>35 && (b.includes(a)||a.includes(b)))) return true;
         const words=s=>new Set(s.split(' ').map((w,i,arr)=>arr.slice(i,i+3).join(' ')));
         const x=words(a),y=words(b),overlap=[...x].filter(w=>y.has(w)).length;
-        return a.length>60 && overlap / Math.max(1,Math.min(x.size,y.size)) > .8;
+        return Math.min(a.length,b.length)>60 && overlap / Math.max(1,x.size+y.size-overlap) > .75;
     });
 }
 export function atomicWrite(file, value) {
