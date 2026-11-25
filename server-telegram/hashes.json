@@ -1,1 +1,7 @@
-{"server/server.mjs":"971823ec6d380e1fceee3a6f2c7110e27f2d19e207d28c7013d041f2aa8ec711","server/core.mjs":"7bf423a9244e4f2b3f9630851858c737affee4bafe4ad850a1456399767b9b51","client/manifest.json":"94f1193594b30254e421f7285b7b07ac6c8514167d7dc6e625c1d527fcd44bb7","client/index.js":"5715cb840769566d154d29ceae98a2e6dd74b124b0c0662bddf625d523b91f24"}
+{
+  "server/core.mjs": "8dab601eea42209f2a02a4cc9a88d33910e707380775ae76c115f39cb69876ea",
+  "server/server.mjs": "29ac49c9a7b9eb0278ad6ef4638400ddf831900bd4247bac05d7d6af4a547026",
+  "server/images.mjs": "6ce64e43f31a5fb2d26b1b9e17cbd46a348a758ae5ea8288e2fe58e30280bb1e",
+  "client/index.js": "40373e5d493cd3f1cba31d8d8b655996f4701fe8b112d261602940bfa34f2265",
+  "client/manifest.json": "4fc2a8c5372ffffea054ebe0e30f82cb310c3ea40b26b271cc65ee8a8be3ae33"
+}

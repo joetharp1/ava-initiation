@@ -1,18 +1,13 @@
-# Hostinger deployment
+# Live deployment — 25 November 2026
 
-VPS: 2117771. Existing project `sillytavern-jjhy`; worker project `astra-initiation`.
-Initial pinned runtime commit: `50bc5eff72f65de9de9d8a60f1eb8c920b196059` on branch `server-telegram-2026-11-25` in `joetharp1/ava-initiation`.
+VPS 2117771, project astra-initiation. Runtime 0.2.0 pinned to f9b09dbef25efa4b77cdd40ecf3181d8feed6b9a. Branch server-telegram-2026-11-25 in joetharp1/ava-initiation.
 
-Current runtime commit: `845aa073f94b05158dbb5125ac5d404910ec74c2`. This fixes a false repeat match caused by empty image-only assistant turns. Nine local tests pass. Live Telegram delivery was confirmed by the API at 04:57:20 UTC on 25 November; chat import and user receipt confirmation are still pending at this note's timestamp.
+Deployment action 127876070 succeeded at 13:57 UTC. Installer backed up existing managed client and settings; worker backed up v1 state before migration. Native ST project was not restarted. Credentials load only from /docker/sillytavern-jjhy/.env on the server; no private values are in this repository.
 
-The Compose definition is `deployment.json`, excluding its private environment. Deployment reuses the existing private ADMIN_USERNAME / ADMIN_PASSWORD environment in Hostinger. Never copy that environment into this repository or a handover file.
+Authenticated live status at 13:57:56 UTC: Mollie, Ava, Astra and Eve March enabled; contextReady and imagesEnabled true for all four; no errors, reply gate removed. Live client returned HTTP 200 and matched the source SHA-256. 15 synthetic Node tests and browser FIFO/image import checks pass; no paid model or actual Telegram calls were used by the fixtures.
 
-Worker sources download from the pinned commit, are checked with SHA-256, and cache in its state volume for offline restarts. State volume is `astra-initiation_state`. Existing data volume is `sillytavern-jjhy_sillytavern-data`, read-only in the worker. Only the installer mounts it writable, to add the new client extension and back up the settings file into the state volume. Existing client versions back up before replacement.
+First natural checks are staggered 1–5 minutes after migration. Later checks use existing 60–120 minute intervals. Telegram text only; images wait in ST inbox; no initiated videos. No daily count quotas. References use the current saved editing model/options at provider cost. All four reference prices were listed at USD 0.06 at preflight.
 
-Traefik routes `/astra-initiation/` on the existing ST hostname to worker port 8787, with higher priority than the ST root route. The API requires the same Basic authentication credentials, a custom request header, and same-origin browser requests. No worker host port is published. Worker resources capped at 256 MiB / 0.5 CPU; installer at 128 MiB. Existing ST image/container is untouched.
+The old Ava client scheduler remains paused. Reload ST once to load client 0.2.0, which imports queued text and pictures. Telegram replies remain unsupported.
 
-Read-only inspection project `initiation-inspect` has stopped after reporting. It must never become a background scheduler. Original `ava-initiation` remains recovery-only.
-
-Pause per chat via the new extension. To pause the whole worker, stop only `astra-initiation-worker-1`; do not stop or replace SillyTavern. Preserve the state volume for receipts/inbox/backups. Removing a project with Hostinger can delete its volumes: do not use project deletion as a casual pause.
-
-At initial deployment, all chats are disabled until the user explicitly enables one and exports its context. Live acceptance is not established until Telegram delivery and exact chat import are both verified.
+Rollback: restore the matched pre-v2 state backup and previous managed-client backup, then redeploy the previous pinned worker 845aa073f94b05158dbb5125ac5d404910ec74c2. Never run old worker against v2 queue state.
