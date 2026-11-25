@@ -1,0 +1,10 @@
+{
+  "display_name": "Server Initiation · Telegram",
+  "loading_order": 1000,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "Joe / Astra",
+  "version": "0.1.0",
+  "homePage": ""
+}
