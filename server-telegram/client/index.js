@@ -16,9 +16,10 @@ async function api(route,body={}){
     return response.json();
 }
 const panel=document.createElement('div');panel.id='astra-server-initiation';panel.className='inline-drawer';
-panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram · 0.2.1</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram · 0.2.2</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p>Messages run on your server, even with SillyTavern closed. Enable each companion chat separately.</p>
 <button type="button" class="menu_button" data-action="enable">Enable this chat</button>
+<button type="button" class="menu_button" data-action="move" hidden>Use this chat instead</button>
 <button type="button" class="menu_button" data-action="refresh">Refresh context</button>
 <button type="button" class="menu_button" data-action="test">Test in 60 seconds</button>
 <button type="button" class="menu_button" data-action="import">Collect pending message</button>
@@ -31,7 +32,9 @@ function say(text){out.textContent=text;}
 function stateFor(t){return lastStatus?.targets.find(x=>x.avatar===t.avatar&&x.chatId===t.chatId);}
 async function status(){
     lastStatus=await api('/status');let t;try{t=stateFor(current());}catch{}
-    if(!t){say('Server connected. Open the companion chat you want, then Enable this chat.');return;}
+    let other;try{const c=current();other=lastStatus.targets.find(x=>x.avatar===c.avatar&&x.chatId!==c.chatId&&x.enabled);}catch{}
+    panel.querySelector('[data-action="move"]').hidden=!other;
+    if(!t||!t.enabled&&other){say(other?`${other.name} is enabled in another chat: ${other.chatId}. ${other.pendingCount||0} message(s) are waiting there. Use this chat instead to move pending messages and prepare this conversation's context.`:'Server connected. Open the companion chat you want, then Enable this chat.');return;}
     const date=n=>new Date(n).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     say(`${t.name}: ${t.enabled?'enabled':'paused'}\n${t.job?'Preparing a message…':`Next check: ${date(t.nextAt)} (${t.min}–${t.max} minute interval).`}\n${t.pendingCount||0} waiting to import · images ${t.imagesEnabled?'available':'need a saved reference'} · Telegram text only.\n${!t.contextReady?'Context refresh needed. ':''}${t.lastError||''}`);
 }
@@ -60,6 +63,17 @@ async function snapshot(enable=false){
 }
 async function collect(){
     const t=current();
+    if(occupied())return;
+    // ST hides mes text for image messages with inline_image=false. Repair only
+    // this extension's own messages, using the active tab's normal save path.
+    const hidden=t.c.chat.map((m,i)=>({m,i})).filter(({m})=>m.extra?.server_initiation?.id&&m.extra?.media?.length&&m.mes?.trim()&&m.extra.inline_image===false);
+    if(hidden.length){
+        const baseline=await api('/baseline',identity(t));
+        if(!same(t)||occupied())return;
+        if(await signature(t.c.chat)!==baseline.signature)throw Error('Reload this chat to restore its saved initiation text safely.');
+        for(const {m,i} of hidden){m.extra.inline_image=true;host.updateMessageBlock(i,m);}
+        await t.c.saveChat();
+    }
     // Drain in order; each item has its own durable receipt and save verification.
     for(let n=0;n<50;n++){
         if(!same(t)||occupied())return;
@@ -77,7 +91,7 @@ async function collect(){
 }
 function attachImage(message,p){
     if(!p.imageUrl)return;
-    Object.assign(message.extra,{media:[{url:p.imageUrl,type:MEDIA_TYPE.IMAGE,title:'Photo.',source:MEDIA_SOURCE.GENERATED,generation_type:'venice'}],media_display:MEDIA_DISPLAY.GALLERY,media_index:0,inline_image:false});
+    Object.assign(message.extra,{media:[{url:p.imageUrl,type:MEDIA_TYPE.IMAGE,title:'Photo.',source:MEDIA_SOURCE.GENERATED,generation_type:'venice'}],media_display:MEDIA_DISPLAY.GALLERY,media_index:0,inline_image:true});
 }
 async function importPending(t,p){
     if(!same(t)||occupied())throw new Error('Finish the current message before collecting.');
@@ -107,6 +121,13 @@ panel.addEventListener('click',event=>{
     const action=event.target.closest('[data-action]')?.dataset.action;if(!action)return;
     guarded(async()=>{
         if(action==='status')return status();
+        if(action==='move'){
+            const t=current();if(occupied())throw Error('Finish the current reply and clear the message box first.');
+            await status();const others=lastStatus.targets.filter(x=>x.avatar===t.avatar&&x.chatId!==t.chatId&&x.enabled);
+            if(others.length!==1)throw Error('No single active source chat was found. Check status first.');
+            await api('/move',{avatar:t.avatar,chatId:others[0].chatId,toChatId:t.chatId});
+            await collect();await snapshot(false);return status();
+        }
         if(action==='pause'){await api('/pause',identity(current()));return status();}
         if(action==='import'){await collect();return status();}
         await collect();

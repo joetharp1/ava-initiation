@@ -149,11 +149,29 @@ async function tick(){if(running)return;
 }
 
 async function dispatch(route,b){
-    if(route==='/status')return {version:'0.2.1',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
+    if(route==='/status')return {version:'0.2.2',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
     if(route==='/baseline')return baseline(b.avatar,b.chatId);
     if(route==='/activity'){browserActivity=Date.now();return {ok:true};}
+    if(route==='/move'){
+        const source=getTarget(b),chatId=safeName(b.toChatId);
+        if(chatId===source.chatId)return publicTarget(source);
+        if(source.job||source.lease?.expires>Date.now())throw Error('Wait for the running attempt or import to finish before moving chats.');
+        readChat(ROOT,source.avatar,chatId); // Same companion directory; destination must exist.
+        const id=targetId(source.avatar,chatId);
+        let dest=state.targets[id];
+        if(dest?.job||dest?.lease?.expires>Date.now())throw Error('The destination chat is busy.');
+        if(!dest)dest=state.targets[id]={id,avatar:source.avatar,chatId,name:source.name,min:source.min,max:source.max,quietStart:source.quietStart,quietEnd:source.quietEnd,queue:[],snapshot:null};
+        dest.queue ||= [];
+        const known=new Set([...dest.queue,...dest.archive||[]].map(p=>p.id));
+        for(const p of source.queue.filter(p=>!p.imported))if(!known.has(p.id)){dest.queue.push({...p,movedFrom:source.chatId});known.add(p.id);}
+        dest.queue.sort((a,b)=>a.createdAt-b.createdAt);
+        source.queue=source.queue.filter(p=>p.imported);source.pending=null;source.enabled=false;source.test=false;source.movedTo=chatId;
+        dest.enabled=true;dest.pending=dest.queue.find(p=>!p.imported)||null;dest.awaitingReply=false;dest.test=false;dest.lastError=null;dest.nextAt=Date.now()+nextDelay(dest);
+        save();event('chat-binding-moved',dest.id,'Pending receipts moved to the selected chat; source paused.');return publicTarget(dest);
+    }
     if(route==='/snapshot'){
         const id=targetId(b.avatar,b.chatId),chat=readChat(ROOT,b.avatar,b.chatId);
+        if(b.enable===true&&Object.values(state.targets).some(t=>t.avatar===b.avatar&&t.id!==id&&t.enabled))throw Error('This companion is enabled in another chat. Use this chat instead to move the binding and pending messages.');
         validateSnapshot(b,chat);
         if(b.sourceHash!==sourceFingerprint(ROOT,b.avatar))throw new Error('Character or settings changed while preparing context. Try Refresh context.');
         if(JSON.stringify(b.params).length>8e6)throw new Error('Context is too large.');

@@ -90,3 +90,22 @@ test('serialized portrait with unavailable image setup delivers an honest failur
   assert.match(p.text,/photo could not be created/);assert.equal(p.imageUrl,undefined);
  }finally{await f.cleanup();}
 });
+
+test('moving a companion binding transfers outstanding receipts once and waits for destination context',async()=>{
+ const f=await fixture();try{
+  await until(()=>f.metrics().telegrams===1);
+  const original={avatar:'Mollie.png',chatId:'chat'},pending=(await f.api('/inbox',original)).data.pending;
+  assert.equal((await f.api('/move',{...original,toChatId:'missing'})).status,400);
+  assert.equal((await f.api('/inbox',original)).data.pending.id,pending.id);
+  const destFile=path.join(f.root,'chats','Mollie','current.jsonl');fs.writeFileSync(destFile,f.initial);
+  const moved=await f.api('/move',{...original,toChatId:'current'});assert.equal(moved.status,200);assert.equal(moved.data.contextReady,false);assert.equal(moved.data.pendingCount,1);
+  assert.equal((await f.api('/inbox',original)).data.pending,null);
+  const dest={avatar:'Mollie.png',chatId:'current'};assert.equal((await f.api('/inbox',dest)).data.pending.id,pending.id);
+  assert.equal((await f.api('/move',{...original,toChatId:'current'})).status,200);assert.equal((await f.api('/status')).data.targets.find(t=>t.chatId==='current').pendingCount,1);
+  await delay(150);assert.equal(f.metrics().generations,1);assert.equal(f.metrics().telegrams,1);
+  fs.appendFileSync(destFile,'\n'+JSON.stringify({is_user:false,mes:pending.text,extra:{server_initiation:{id:pending.id}}}));
+  assert.equal((await f.api('/ack',{...dest,id:pending.id})).status,200);
+  assert.equal((await f.api('/status')).data.targets.find(t=>t.chatId==='chat').enabled,false);
+  assert.equal((await f.api('/move',{...dest,toChatId:'../Ava/current'})).status,400);
+ }finally{await f.cleanup();}
+});
