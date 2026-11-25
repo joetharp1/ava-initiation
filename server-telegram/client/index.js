@@ -1,4 +1,5 @@
 import * as host from '../../../../script.js';
+import {MEDIA_TYPE,MEDIA_SOURCE,MEDIA_DISPLAY} from '../../../constants.js';
 import {getContext} from '../../../extensions.js';
 import {createGenerationParameters,getChatCompletionModel,oai_settings} from '../../../openai.js';
 
@@ -15,7 +16,7 @@ async function api(route,body={}){
     return response.json();
 }
 const panel=document.createElement('div');panel.id='astra-server-initiation';panel.className='inline-drawer';
-panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram · 0.2.0</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p>Messages run on your server, even with SillyTavern closed. Enable each companion chat separately.</p>
 <button type="button" class="menu_button" data-action="enable">Enable this chat</button>
 <button type="button" class="menu_button" data-action="refresh">Refresh context</button>
@@ -24,7 +25,7 @@ panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Serve
 <button type="button" class="menu_button" data-action="pause">Pause this chat</button>
 <button type="button" class="menu_button" data-action="status">Check status</button>
 <p data-status role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">Checking server…</p>
-<small>Text only · one unanswered initiation per chat · maximum 3 per day · existing interval and quiet-hour settings · Europe/London.<br>Telegram carries the message. Its saved inbox copy is imported into this chat when you return. Reply in SillyTavern; Telegram replies are not connected yet.</small></div>`;
+<small>No daily quota · follow-ups without a reply · text and optional still images · no videos · existing interval and quiet hours · Europe/London.<br>Telegram receives text only. Text and pictures are saved in your server inbox and imported here when you return. Reply in SillyTavern; Telegram replies are not connected yet.</small></div>`;
 const out=panel.querySelector('[data-status]');
 function say(text){out.textContent=text;}
 function stateFor(t){return lastStatus?.targets.find(x=>x.avatar===t.avatar&&x.chatId===t.chatId);}
@@ -32,7 +33,7 @@ async function status(){
     lastStatus=await api('/status');let t;try{t=stateFor(current());}catch{}
     if(!t){say('Server connected. Open the companion chat you want, then Enable this chat.');return;}
     const date=n=>new Date(n).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    say(`${t.name}: ${t.enabled?'enabled':'paused'}\n${t.job?'Generating one message…':t.pending?`Telegram: ${t.pending.telegramState}. Chat: ${t.pending.imported?'saved and verified':'waiting to import'}.`:t.awaitingReply?'Waiting for your next completed exchange.':`Next check: ${date(t.nextAt)} (${t.min}–${t.max} minute interval).`}\n${t.lastError||''}`);
+    say(`${t.name}: ${t.enabled?'enabled':'paused'}\n${t.job?'Preparing a message…':`Next check: ${date(t.nextAt)} (${t.min}–${t.max} minute interval).`}\n${t.pendingCount||0} waiting to import · images ${t.imagesEnabled?'available':'need a saved reference'} · Telegram text only.\n${!t.contextReady?'Context refresh needed. ':''}${t.lastError||''}`);
 }
 async function activity(){if(Date.now()-lastActivity<10000)return;lastActivity=Date.now();try{await api('/activity');}catch{}}
 function occupied(){return host.isGenerating()||String(document.getElementById('send_textarea')?.value||'').trim();}
@@ -58,13 +59,25 @@ async function snapshot(enable=false){
     await status();
 }
 async function collect(){
-    const t=current();if(occupied())return;
-    const inbox=await api('/inbox',identity(t));if(!inbox.pending)return;
-    if(!same(t))return;
-    const p=inbox.pending;
-    if(t.c.chat.some(m=>m.extra?.server_initiation?.id===p.id)){await api('/ack',{...identity(t),id:p.id});await status();return;}
-    if(await signature(t.c.chat)!==p.baseSignature){say(`${t.name} has a message in the server inbox. Your conversation has moved on; use Collect pending message to add it after the current exchange.`);return {needsManual:true,pending:p};}
-    await importPending(t,p);
+    const t=current();
+    // Drain in order; each item has its own durable receipt and save verification.
+    for(let n=0;n<50;n++){
+        if(!same(t)||occupied())return;
+        const inbox=await api('/inbox',identity(t));if(!inbox.pending)return;
+        if(!same(t))return;
+        const p=inbox.pending,existing=t.c.chat.find(m=>m.extra?.server_initiation?.id===p.id);
+        if(existing){
+            if(p.imageUrl&&!existing.extra?.media?.some(m=>m.url===p.imageUrl)){
+                attachImage(existing,p);await t.c.saveChat();await t.c.reloadCurrentChat();return;
+            }
+            await api('/ack',{...identity(t),id:p.id});continue;
+        }
+        await importPending(t,p);
+    }
+}
+function attachImage(message,p){
+    if(!p.imageUrl)return;
+    Object.assign(message.extra,{media:[{url:p.imageUrl,type:MEDIA_TYPE.IMAGE,title:'Photo.',source:MEDIA_SOURCE.GENERATED,generation_type:'venice'}],media_display:MEDIA_DISPLAY.GALLERY,media_index:0,inline_image:false});
 }
 async function importPending(t,p){
     if(!same(t)||occupied())throw new Error('Finish the current message before collecting.');
@@ -74,6 +87,7 @@ async function importPending(t,p){
     const textarea=document.getElementById('send_textarea'),wasDisabled=textarea?.disabled;
     if(textarea)textarea.disabled=true;
     const message={name:t.name,is_user:false,is_system:false,send_date:new Date(p.createdAt).toISOString(),mes:p.text,extra:{server_initiation:{id:p.id,createdAt:p.createdAt,source:'telegram-server'}}};
+    attachImage(message,p);
     try{
         // No server-side whole-chat writes: use ST's normal save from the active, verified tab.
         t.c.chat.push(message);host.addOneMessage(message);
@@ -94,7 +108,7 @@ panel.addEventListener('click',event=>{
     guarded(async()=>{
         if(action==='status')return status();
         if(action==='pause'){await api('/pause',identity(current()));return status();}
-        if(action==='import'){const t=current(),result=await collect();if(result?.needsManual)await importPending(t,result.pending);return status();}
+        if(action==='import'){await collect();return status();}
         await collect();
         if(action==='enable')return snapshot(true);
         if(action==='refresh')return snapshot(false);
@@ -103,7 +117,7 @@ panel.addEventListener('click',event=>{
 });
 function schedule(){clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>guarded(async()=>{
     if(document.hidden||occupied())return;await status();await collect();const t=current();const s=stateFor(t);
-    if(s?.enabled&&!s.job&&(!s.pending||s.pending.imported))await snapshot(false);
+    if(s?.enabled&&!s.job)await snapshot(false);
 }),3000);}
 host.eventSource.on(host.event_types.CHAT_CHANGED,()=>{schedule();});
 host.eventSource.on(host.event_types.GENERATION_STARTED,(type,options,dry)=>{if(!dry)activity();});
@@ -113,4 +127,4 @@ document.getElementById('send_textarea')?.addEventListener('input',activity);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)guarded(async()=>{await status();await collect();});});
 setInterval(()=>{if(!document.hidden&&!busy)guarded(async()=>{await status();await collect();});},20000);
 document.getElementById('extensions_settings')?.appendChild(panel);
-status().catch(e=>say(e.message));
+status().then(schedule).catch(e=>say(e.message));

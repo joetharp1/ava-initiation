@@ -39,21 +39,42 @@ export function readChat(root, avatar, chatId) {
     const all=raw.split('\n').filter(Boolean).map(s=>JSON.parse(s));
     return {file,raw,hash:hash(raw),rows:all.filter(m=>typeof m.mes==='string'),signature:signature(all)};
 }
+// The prompt is a frozen ST-assembled snapshot. Runtime settings, journals,
+// generated media and other companions must not invalidate it.
 export function sourceFingerprint(root, avatar) {
     const s=JSON.parse(fs.readFileSync(path.join(root,'settings.json'),'utf8'));
-    // A different selected chat is not a change to this companion's context.
-    const relevant={oai:s.oai_settings,world:s.world_info_settings,power:s.power_user,extensions:s.extension_settings,username:s.username,user_avatar:s.user_avatar};
-    const files=[];
-    const walk=(dir,depth=0)=>{
-        if(!fs.existsSync(dir)||depth>4)return;
-        for(const d of fs.readdirSync(dir,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))){
-            const p=path.join(dir,d.name);if(d.isDirectory())walk(p,depth+1);else {const st=fs.statSync(p);files.push([p,st.size,st.mtimeMs]);}
-        }
-    };
-    for(const sub of ['worlds','user/files'])walk(path.join(root,sub));
-    const card=path.join(root,'characters',safeName(avatar));
-    const cardData=fs.readFileSync(card);
-    return hash([relevant,files,hash(cardData)]);
+    const card=fs.readFileSync(path.join(root,'characters',safeName(avatar)));
+    return hash([hash(card),s.username,s.user_avatar,s.power_user?.persona_description]);
+}
+export function rowKeys(rows) { return rows.map(m=>signature([m])); }
+export function appendOnlyDelta(snapshot, chat) {
+    const keys=rowKeys(chat.rows), base=snapshot.rowKeys;
+    if(!Array.isArray(base) || base.some((k,i)=>keys[i]!==k)) throw new Error('Conversation history changed. Open this chat to refresh context.');
+    const delta=chat.rows.slice(base.length);
+    if(delta.length>100 || JSON.stringify(delta.map(m=>m.mes)).length>60000) throw new Error('Open this chat to refresh its extended conversation context.');
+    return delta;
+}
+// Upgrade old snapshots by locating their final exact conversational pair.
+// Never infer a base across an edit or a single ambiguous matching sentence.
+export function recoverRowKeys(snapshot,chat) {
+    if(snapshot.chatHash===chat.hash)return rowKeys(chat.rows);
+    const msgs=snapshot.params?.messages?.filter(m=>['user','assistant'].includes(m.role)&&typeof m.content==='string')||[];
+    const tail=msgs.slice(-2);
+    if(tail.length<2)return null;
+    const hits=[];
+    for(let i=1;i<chat.rows.length;i++){
+        if(tail.every((m,j)=>{const r=chat.rows[i-1+j];return !r.is_system && (r.is_user?'user':'assistant')===m.role && r.mes===m.content;}))hits.push(i);
+    }
+    return hits.length===1?rowKeys(chat.rows.slice(0,hits[0]+1)):null;
+}
+export function parseInitiation(content) {
+    const raw=String(content||'').trim();let result;
+    try {result=JSON.parse(raw.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}catch{
+        if(raw.startsWith('{')||raw.startsWith('```'))throw new Error('Invalid model notification format.');
+        result={text:raw};
+    }
+    if(typeof result.text!=='string'||result.text.trim().length<2||result.text.length>3500||/<think>|<analysis>/i.test(result.text))throw new Error('Invalid model notification text.');
+    return {text:result.text.trim(),imagePrompt:typeof result.imagePrompt==='string'?result.imagePrompt.trim().slice(0,1500):null};
 }
 export function validateSnapshot(payload, chat) {
     if(payload.signature!==chat.signature || payload.chatHash!==chat.hash) throw new Error('Chat changed during context preparation. Refresh context after the reply has finished.');
@@ -66,11 +87,9 @@ export function validateSnapshot(payload, chat) {
     return true;
 }
 export function eligible(target, now) {
-    if(!target.enabled || !target.snapshot || target.job || target.awaitingReply || now<target.nextAt) return false;
-    if(!target.test && quietAt(now,target.quietStart,target.quietEnd))return false;
-    const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/London'}).format(new Date(now));
-    return target.test || (target.day!==day || (target.dayCount||0)<3);
+    if(!target.enabled || !target.snapshot || target.job || now<target.nextAt) return false;
+    return target.test || !quietAt(now,target.quietStart,target.quietEnd);
 }
-export function initiationInstruction(name, user, now, lastReply) {
-    return `[New proactive message, not a response to a new user turn. It is ${new Date(now).toLocaleString('en-GB',{timeZone:'Europe/London'})} in Europe/London. The preceding exchange is already complete. The last reply you sent was: ${JSON.stringify(lastReply).slice(0,6000)}. Write one fresh, brief, natural message from ${name} to ${user}, grounded in your established character and the supplied conversation/memories. Choose a new thought, observation, or question rather than repeating or continuing your last reply. Do not invent a new message or action from ${user}, claim to observe their real surroundings, or pressure them to answer. Stay in character. Output only the message, with no planning, headings, JSON, or tool calls. Keep it suitable as a short text notification, about 1–3 sentences.]`;
+export function initiationInstruction(name,user,now,lastReply,images=false) {
+    return `[Proactive message from ${name} to ${user}. It is ${new Date(now).toLocaleString('en-GB',{timeZone:'Europe/London'})} in Europe/London. There is no new user turn. You may follow up without a reply; never invent a reply or action from the user, imply you observe their real surroundings, or pressure them to answer. Your last message was ${JSON.stringify(lastReply).slice(0,6000)}. Write a fresh natural thought, observation or question grounded in your character, world and conversation. About 1–3 sentences. Vary your topics instead of repeating the last message. ${images?'You may optionally share ONE still self-portrait if it naturally fits. Describe the scene, clothing and expression in imagePrompt; your own saved face reference is attached automatically. Do not assume the image succeeded or claim it has been sent in your text.':'No image is available; set imagePrompt to null.'} Videos are not available. Do not call tools. Return only a JSON object with text (your message) and imagePrompt (an optional visual description or null).]`;
 }

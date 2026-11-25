@@ -21,10 +21,11 @@ test('exact and close repeats rejected, fresh text accepted',()=>{
  assert(!repeatText('I found a new book that reminded me of our conversation.',['How was your day?']));
  assert(!repeatText('I found a new book that reminded me of our conversation.',['','I','Hi','A photo.']));
 });
-test('no second outstanding initiation, daily cap, and explicit test bypasses quiet hours',()=>{
+test('no daily quota or reply gate; pacing, pause and quiet hours remain',()=>{
  const now=Date.parse('2026-11-25T04:00:00Z');const t={enabled:true,snapshot:{},nextAt:now-1,quietStart:'23:00',quietEnd:'08:00'};
  assert(!eligible(t,now));assert(eligible({...t,test:true},now));
- assert(!eligible({...t,test:true,awaitingReply:true},now));assert(!eligible({...t,test:true,job:{}},now));
+ assert(eligible({...t,test:true,awaitingReply:true,dayCount:100},now));
+ assert(!eligible({...t,test:true,nextAt:now+60000},now));assert(!eligible({...t,test:true,job:{}},now));
  assert(!eligible({...t,test:true,enabled:false},now));
 });
 test('atomic receipts and history signatures protect identity and exact text',()=>{
@@ -41,4 +42,17 @@ test('snapshot binds actual saved history and Venice endpoint',()=>{
  assert(validateSnapshot(p,chat));assert.throws(()=>validateSnapshot({...p,chatHash:'old'},chat));
  assert.throws(()=>validateSnapshot({...p,params:{...p.params,custom_url:'http://127.0.0.1/admin'}},chat));
  assert.throws(()=>validateSnapshot(p,{...chat,rows:[{is_user:true,mes:'Still waiting'}]}));
+});
+
+test('captured history accepts append-only follow-ups, but rejects edits and truncation',async()=>{
+ const {rowKeys,appendOnlyDelta,recoverRowKeys,parseInitiation}=await import('../server/core.mjs');
+ const rows=[{is_user:true,mes:'Hi'},{is_user:false,mes:'Hello'}],snapshot={rowKeys:rowKeys(rows)};
+ assert.equal(appendOnlyDelta(snapshot,{rows:[...rows,{is_user:false,mes:'A fresh thought'}]}).length,1);
+ assert.throws(()=>appendOnlyDelta(snapshot,{rows:[rows[0],{is_user:false,mes:'Edited'}]}));
+ assert.throws(()=>appendOnlyDelta(snapshot,{rows:[rows[0]]}));
+ const old={chatHash:'old',params:{messages:[{role:'user',content:'Hi'},{role:'assistant',content:'Hello'}]}};
+ assert.deepEqual(recoverRowKeys(old,{hash:'new',rows:[...rows,{is_user:true,mes:'Next'}]}),rowKeys(rows));
+ assert.equal(recoverRowKeys(old,{hash:'new',rows:[...rows,...rows]}),null);
+ assert.deepEqual(parseInitiation('{"text":"Hello again","imagePrompt":null}'),{text:'Hello again',imagePrompt:null});
+ assert.throws(()=>parseInitiation('{bad json'));assert.throws(()=>parseInitiation('{"text":""}'));
 });

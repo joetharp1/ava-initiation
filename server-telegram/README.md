@@ -1,28 +1,21 @@
-# Server initiation / Telegram — 0.1.0
+# Server Initiation 0.2.0
 
-A separate server worker and SillyTavern client extension for proactive text messages while every browser is closed. The original Ava Initiation browser scheduler remains paused.
+Server-owned proactive messages for individually enabled SillyTavern chats. The existing browser-only Ava scheduler remains paused.
 
-## Behaviour
+- No daily text or image count cap and no reply requirement. Existing per-chat 60–120 minute spacing and London quiet hours remain.
+- Native ST context snapshots preserve character/world/memory instructions. Unrelated extension settings, saved images and journal files no longer invalidate them. Append-only completed exchanges are included automatically; edits, deletion or character/persona changes require a refreshed snapshot. The client refreshes on opening a chat or completing an exchange.
+- Durable FIFO inbox supports multiple unanswered messages, imports each with its original timestamp, and verifies exact saved text and image URL. No server-side whole-chat writes.
+- One text generation per scheduled opportunity. The model may choose an optional still self-portrait using that companion's saved Venice Image Bridge reference/model/options. The server reuses the installed bridge's portrait request builder, makes one image request, saves it in that character's ST gallery, and attaches it to the inbox receipt. No image count quota; provider credits and the selected image model's normal charge apply. Video budgets/settings are unchanged.
+- Telegram uses sendMessage only, previews disabled. No photo, video, image URL or image prompt is sent to Telegram. Replies from Telegram are not connected.
+- No general tool execution and no initiated videos. Normal chat video and journal tools are unchanged.
+- Failed attempts wait until the next normal interval; no immediate paid retries. Ambiguous image/Telegram outcomes are never replayed. Restart recovery preserves inbox receipts.
 
-- Each individual chat is enabled explicitly. SillyTavern's own dry-run prompt assembly and configured Chat Completion adapters provide its context; this is a saved prompt, not a server reimplementation of every extension.
-- The worker checks the saved chat and context dependencies before and after its single model request. Changed context stops delivery until the chat is refreshed. It uses the existing authenticated SillyTavern backend and Venice connection.
-- Telegram receives the generated message, then the same durable inbox item imports into its selected chat on return. Telegram replies are not yet ingested. An imported message must be followed by a user reply before another initiation.
-- A server restart never repeats an in-flight model call or an uncertain Telegram send. Model errors are visible and do not automatically retry. Maximum three automatic messages per chat/day; explicit tests bypass quiet hours and daily scheduling limits.
-- The client and server verify chat identity and history before import and verify the message ID and text in the saved chat before acknowledgement. A moved-on conversation requires manual collection; no background whole-chat replacement occurs.
-- Scheduling copies the existing initiation interval and quiet hours at first enable, interpreted in Europe/London. A dedicated test schedules one attempt after 60 seconds.
+## Migration and rollback
+State v1 is backed up before v2 migration. Existing enabled companions and intervals are retained. Exact chat hashes or an unambiguous final user/assistant pair recover the old prompt anchor; otherwise the UI requests a refresh. Previously frozen prompt context remains in use until refreshed, including existing world/memory content. First staggered checks after migration occur in 1–5 minutes. Subsequent checks use saved spacing.
 
-## Installation
+Deploy only the astra-initiation project and its managed client extension. ST itself is not restarted. Worker uses the existing server-side env_file for credentials; no credentials belong in Git or deployment payloads. Rollback requires restoring the matching pre-v2 state backup and previous client/server runtime together.
 
-Deploy as an isolated Docker Compose project with the existing SillyTavern data mounted read-only for the worker and a separate persistent state volume. The one-shot installer writes only the new `astra-server-initiation` user extension, backing up settings and any previous managed version first. Existing ST server/configuration/plugins are not restarted or replaced. The worker's API uses the same Basic authentication as ST, origin checks and a custom request header, with no published host port.
-
-Pin all installed sources by commit and SHA-256. Do not put credentials in this repository. Supply Basic authentication credentials only via the server's private environment; Telegram credentials remain in existing ST settings.
-
-## Test
-
-`npm install --ignore-scripts` then `node --test tests/*.test.mjs`.
-
-Live acceptance: refresh ST, open the selected companion, Extensions → Server Initiation · Telegram → Enable this chat → Test in 60 seconds, close every ST tab, receive Telegram, reopen the same chat and confirm import/readback and normal replies.
-
-## Limitations
-
-This is text-only and first supports the existing Venice custom connection. Full companion context is refreshed by the browser on setup and after completed conversation, not independently reassembled while offline. Context changes pause rather than guess. Use one active ST editing tab/device during import; ST's wider multi-device whole-chat save behaviour is unchanged. Pending messages and up to 20 prior receipts are retained on the VPS.
+## Verification
+`node --test tests/*.test.mjs`
+`node tests/browser.cjs`
+Image tests reuse the installed bridge's pure portrait builder; set VENICE_PORTRAITS_MODULE to its local portraits.mjs path. Browser fixture requires Playwright in CODEX_PRIMARY_RUNTIME_NODE_MODULES and Chromium at /tmp/chromium. Synthetic tests do not call a paid provider or send real Telegram messages.
