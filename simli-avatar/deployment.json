@@ -1,0 +1,83 @@
+{
+  "services": {
+    "install": {
+      "image": "ghcr.io/sillytavern/sillytavern:1.19.0",
+      "pull_policy": "never",
+      "restart": "no",
+      "entrypoint": [
+        "node",
+        "-e",
+        "const fs=require('fs'),crypto=require('crypto'),path=require('path');const base='https://raw.githubusercontent.com/joetharp1/ava-initiation/a62b4e27bf962df683cb3605327505a64c25dadc/simli-avatar/',dir='/state/code/a62b4e27';const hashes={\"client.js\":\"acb49e49726e7306c9fb0bee31601b5344608540a6132b8e02cf439f9d902ab9\",\"server.mjs\":\"b2470fd7c126ccece3d5cd70c586b9702ca56241b3402128fb9c43e7b35dfd69\",\"manifest.json\":\"1603670a44249bd5dbe510cdb2bd179aa56927af687dbc695de8c9cc0cbae1dc\",\"package.json\":\"3781db4b2ed193b5fb4837a803a14855225666345003b436f6cc81d1e78232ea\",\"package-lock.json\":\"25e7267a7783e6d3712aefa837e239bf8a77b746c1e05a6dd9391a05897721e1\"};const digest=b=>crypto.createHash('sha256').update(b).digest('hex');async function get(p){const f=dir+'/'+p;if(fs.existsSync(f)){const b=fs.readFileSync(f);if(digest(b)===hashes[p])return b;}const r=await fetch(base+p,{signal:AbortSignal.timeout(30000)});if(!r.ok)throw Error('Source download failed '+r.status);const b=Buffer.from(await r.arrayBuffer());if(digest(b)!==hashes[p])throw Error('Source checksum mismatch');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(f,b);return b;}(async()=>{for(const p of Object.keys(hashes))await get(p);const cp=require('child_process');if(!fs.existsSync(dir+'/index.js')){cp.execFileSync('npm',['ci','--omit=dev','--no-audit','--no-fund'],{cwd:dir,stdio:'inherit',timeout:180000});cp.execFileSync(dir+'/node_modules/.bin/esbuild',['client.js','--bundle','--format=esm','--platform=browser','--target=es2022','--external:../../../extensions.js','--outfile=index.js','--minify'],{cwd:dir,stdio:'inherit',timeout:60000});}const target='/st-data/default-user/extensions/astra-simli-avatar';if(fs.existsSync(target)){if(!fs.existsSync(target+'/.astra-managed'))throw Error('Unmanaged extension exists');fs.cpSync(target,'/state/backups/'+Date.now(),{recursive:true});}fs.mkdirSync(target,{recursive:true});for(const n of ['index.js','manifest.json']){fs.copyFileSync(dir+'/'+n,target+'/'+n+'.tmp');fs.renameSync(target+'/'+n+'.tmp',target+'/'+n);fs.chmodSync(target+'/'+n,420);}fs.writeFileSync(target+'/.astra-managed','0.1.0');console.log('Avatar extension installed.');})().catch(e=>{console.error(e.message);process.exit(1)});"
+      ],
+      "mem_limit": "512m",
+      "volumes": [
+        "data:/st-data",
+        "state:/state"
+      ],
+      "networks": [
+        "st"
+      ]
+    },
+    "worker": {
+      "image": "ghcr.io/sillytavern/sillytavern:1.19.0",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "entrypoint": [
+        "node",
+        "-e",
+        "const fs=require('fs'),crypto=require('crypto'),path=require('path');const base='https://raw.githubusercontent.com/joetharp1/ava-initiation/a62b4e27bf962df683cb3605327505a64c25dadc/simli-avatar/',dir='/state/code/a62b4e27';const hashes={\"client.js\":\"acb49e49726e7306c9fb0bee31601b5344608540a6132b8e02cf439f9d902ab9\",\"server.mjs\":\"b2470fd7c126ccece3d5cd70c586b9702ca56241b3402128fb9c43e7b35dfd69\",\"manifest.json\":\"1603670a44249bd5dbe510cdb2bd179aa56927af687dbc695de8c9cc0cbae1dc\",\"package.json\":\"3781db4b2ed193b5fb4837a803a14855225666345003b436f6cc81d1e78232ea\",\"package-lock.json\":\"25e7267a7783e6d3712aefa837e239bf8a77b746c1e05a6dd9391a05897721e1\"};const digest=b=>crypto.createHash('sha256').update(b).digest('hex');async function get(p){const f=dir+'/'+p;if(fs.existsSync(f)){const b=fs.readFileSync(f);if(digest(b)===hashes[p])return b;}const r=await fetch(base+p,{signal:AbortSignal.timeout(30000)});if(!r.ok)throw Error('Source download failed '+r.status);const b=Buffer.from(await r.arrayBuffer());if(digest(b)!==hashes[p])throw Error('Source checksum mismatch');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(f,b);return b;}(async()=>{await get('server.mjs');await import(dir+'/server.mjs');})().catch(e=>{console.error(e.message);process.exit(1)});"
+      ],
+      "depends_on": {
+        "install": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "read_only": true,
+      "tmpfs": [
+        "/tmp:size=16m"
+      ],
+      "mem_limit": "128m",
+      "cpus": 0.25,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "environment": {
+        "NODE_ENV": "production",
+        "ST_USER": "${ADMIN_USERNAME}",
+        "ST_PASSWORD": "${ADMIN_PASSWORD}",
+        "PUBLIC_ORIGIN": "https://sillytavern-jjhy.marchandwren.com"
+      },
+      "volumes": [
+        "state:/state"
+      ],
+      "networks": [
+        "st"
+      ],
+      "labels": [
+        "traefik.enable=true",
+        "traefik.docker.network=sillytavern-jjhy_default",
+        "traefik.http.routers.astra-avatar.rule=Host(`sillytavern-jjhy.marchandwren.com`) && PathPrefix(`/astra-avatar/`)",
+        "traefik.http.routers.astra-avatar.priority=100",
+        "traefik.http.routers.astra-avatar.entrypoints=websecure",
+        "traefik.http.routers.astra-avatar.tls.certresolver=letsencrypt",
+        "traefik.http.services.astra-avatar.loadbalancer.server.port=8788"
+      ]
+    }
+  },
+  "volumes": {
+    "data": {
+      "external": true,
+      "name": "sillytavern-jjhy_sillytavern-data"
+    },
+    "state": {}
+  },
+  "networks": {
+    "st": {
+      "external": true,
+      "name": "sillytavern-jjhy_default"
+    }
+  }
+}
