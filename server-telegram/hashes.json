@@ -1,7 +1,7 @@
 {
-  "server/core.mjs": "8dab601eea42209f2a02a4cc9a88d33910e707380775ae76c115f39cb69876ea",
-  "server/server.mjs": "29ac49c9a7b9eb0278ad6ef4638400ddf831900bd4247bac05d7d6af4a547026",
+  "server/core.mjs": "ac268619d48edc8c79e6ad2f2ff59b4c216dc4826e47159497096e1c3f363e3e",
+  "server/server.mjs": "2bbd3b17874677c5bff4e0f76a0524d847b07dd1eecb677822abf94f57fba631",
   "server/images.mjs": "6ce64e43f31a5fb2d26b1b9e17cbd46a348a758ae5ea8288e2fe58e30280bb1e",
-  "client/index.js": "40373e5d493cd3f1cba31d8d8b655996f4701fe8b112d261602940bfa34f2265",
-  "client/manifest.json": "4fc2a8c5372ffffea054ebe0e30f82cb310c3ea40b26b271cc65ee8a8be3ae33"
+  "client/index.js": "cbcd364c12be26a2779d0598ae55b21bd9a598a0658bdca02e58097c761940ff",
+  "client/manifest.json": "f897f2a056b5eba15da9ed85730652ecefa0878022c7360b45f6ead7148fda62"
 }
