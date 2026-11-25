@@ -4,7 +4,7 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
-import {hash,signature,targetId,safeName,readChat,sourceFingerprint,atomicWrite,eligible,repeatText,validateSnapshot,initiationInstruction,rowKeys,appendOnlyDelta,recoverRowKeys,parseInitiation} from './core.mjs';
+import {hash,signature,targetId,safeName,readChat,sourceFingerprint,atomicWrite,eligible,repeatText,validateSnapshot,initiationInstruction,rowKeys,appendOnlyDelta,recoverRowKeys,parseInitiation,hasToolMarkup,visibleInitiationText} from './core.mjs';
 
 const ROOT=process.env.ST_DATA_ROOT||'/st-data/default-user';
 const STATE=process.env.STATE_ROOT||'/state';
@@ -74,6 +74,7 @@ async function makeImage(t,p,prompt){
     p.imageUrl=url;p.imageState='ready';save();
 }
 async function notify(t,p){
+    if(hasToolMarkup(p.text)){p.telegramState='withheld';save();throw Error('Raw model command withheld from Telegram.');}
     const a=settings().extension_settings?.['ava-initiation'];
     if(!a?.telegramToken||!a?.telegramChatId){p.telegramState='failed';save();throw new Error('Telegram configuration is missing.');}
     p.telegramState='sending';save();
@@ -117,12 +118,11 @@ async function run(t){
         if(Array.isArray(excluded))request.custom_exclude_body=JSON.stringify(excluded.filter(k=>!['stream','n','max_tokens','messages','model'].includes(k)));
         const result=await stRequest('/api/backends/chat-completions/generate',request);
         const message=result.choices?.[0]?.message;
-        const {text,imagePrompt}=parseInitiation(message?.content);
-        if(message?.tool_calls?.length)throw new Error('The provider returned a tool call; no action was executed.');
-        if(text.length<2||text.length>3500||/<think>|<analysis>/i.test(text))throw new Error('The model returned an unsuitable notification response.');
-        if(repeatText(text,[...chat.rows.filter(m=>!m.is_user&&!m.is_system).slice(-8).map(m=>m.mes),...t.queue.slice(-30).map(p=>p.text)]))throw new Error('Repeated message rejected. No replacement request was made.');
+        const {text,imagePrompt,imageOnly=false}=parseInitiation(message?.content,message?.tool_calls||[]);
+        if(!imageOnly&&(text.length<2||text.length>3500||/<think>|<analysis>/i.test(text)))throw new Error('The model returned an unsuitable notification response.');
+        if(text&&repeatText(text,[...chat.rows.filter(m=>!m.is_user&&!m.is_system).slice(-8).map(m=>m.mes),...t.queue.slice(-30).map(p=>p.text)]))throw new Error('Repeated message rejected. No replacement request was made.');
         if(!t.enabled||!current(t)||readFor(t).hash!==chat.hash||activityBlocks(t))throw new Error('Conversation activity changed or initiation was paused while generating; the message was not sent.');
-        const p={id,text,createdAt:Date.now(),baseHash:chat.hash,baseSignature:chat.signature,telegramState:'not-sent',imported:false,imageState:'none'};
+        const p={id,text,createdAt:Date.now(),baseHash:chat.hash,baseSignature:chat.signature,telegramState:'not-sent',imported:false,imageState:'none',imageOnly};
         t.queue.push(p);t.pending=t.queue.find(p=>!p.imported)||null;
         t.awaitingReply=false;t.test=false;t.nextAt=Date.now()+nextDelay(t);
         const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/London'}).format(new Date());
@@ -132,7 +132,7 @@ async function run(t){
             t.job.stage='image';save();
             try{await makeImage(t,p,imagePrompt);}catch{p.imageState='failed';t.lastError='Optional image failed; text was retained. No image retry.';save();}
         }
-        t.job=null;save();
+        p.text=visibleInitiationText(p,t.name);t.job=null;save();
         if(t.enabled)await notify(t,p);
     }catch(error){
         t.job=null;t.test=false;t.awaitingReply=false;t.nextAt=Date.now()+nextDelay(t);
@@ -143,13 +143,13 @@ async function run(t){
 async function tick(){if(running)return;
     for(const t of Object.values(state.targets)){
         const unsent=t.enabled&&t.queue.find(p=>p.telegramState==='not-sent');
-        if(unsent){running=true;try{await notify(t,unsent);}catch{t.lastError='Telegram delivery failed; no automatic resend.';save();}finally{running=false;}return;}
+        if(unsent){running=true;try{unsent.text=visibleInitiationText(unsent,t.name);save();await notify(t,unsent);}catch{t.lastError='Telegram delivery failed; no automatic resend.';save();}finally{running=false;}return;}
     }
     for(const t of Object.values(state.targets).sort((a,b)=>a.nextAt-b.nextAt)){if(eligible(t,Date.now())){await run(t);break;}}
 }
 
 async function dispatch(route,b){
-    if(route==='/status')return {version:'0.2.0',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
+    if(route==='/status')return {version:'0.2.1',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
     if(route==='/baseline')return baseline(b.avatar,b.chatId);
     if(route==='/activity'){browserActivity=Date.now();return {ok:true};}
     if(route==='/snapshot'){

@@ -16,7 +16,7 @@ async function api(route,body={}){
     return response.json();
 }
 const panel=document.createElement('div');panel.id='astra-server-initiation';panel.className='inline-drawer';
-panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram · 0.2.0</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Server Initiation · Telegram · 0.2.1</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content"><p>Messages run on your server, even with SillyTavern closed. Enable each companion chat separately.</p>
 <button type="button" class="menu_button" data-action="enable">Enable this chat</button>
 <button type="button" class="menu_button" data-action="refresh">Refresh context</button>

@@ -58,3 +58,20 @@ test('captured history accepts append-only follow-ups, but rejects edits and tru
  assert.deepEqual(parseInitiation('{"text":"Hello again","imagePrompt":null}'),{text:'Hello again',imagePrompt:null});
  assert.throws(()=>parseInitiation('{bad json'));assert.throws(()=>parseInitiation('{"text":""}'));
 });
+
+test('DeepSeek serialized portrait invocation becomes private image intent, never visible text',async()=>{
+ const {parseInitiation,visibleInitiationText}=await import('../server/core.mjs');
+ const raw='<｜DSML｜ calls>\n<｜DSML｜ invoke name="VeniceCreateSelfPortrait">\n<｜DSML｜ parameter name="prompt" string="true">Reading by a window in a blue jumper.</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>';
+ const p=parseInitiation(raw);assert.equal(p.text,'');assert.equal(p.imagePrompt,'Reading by a window in a blue jumper.');assert.equal(p.imageOnly,true);
+ assert.equal(visibleInitiationText({...p,imageState:'ready'},'Mollie'),'Mollie shared a photo in SillyTavern.');
+ assert.match(visibleInitiationText({...p,imageState:'failed'},'Mollie'),/could not be created/);
+ assert.throws(()=>visibleInitiationText({text:raw},'Mollie'));
+ for(const bad of [raw.replace('VeniceCreateSelfPortrait','VeniceCreateVideo'),raw+'another command',raw.replace('</｜DSML｜ calls>',''),JSON.stringify({text:raw,imagePrompt:null}),'<tool_call>anything</tool_call>'])assert.throws(()=>parseInitiation(bad));
+});
+test('native portrait calls are whitelisted; videos and multiple tool calls are refused',async()=>{
+ const {parseInitiation}=await import('../server/core.mjs');
+ const call={function:{name:'VeniceCreateSelfPortrait',arguments:JSON.stringify({prompt:'A walk in the park in a winter coat.'})}};
+ assert.equal(parseInitiation(null,[call]).imageOnly,true);
+ assert.throws(()=>parseInitiation(null,[call,call]));
+ assert.throws(()=>parseInitiation(null,[{function:{...call.function,name:'VeniceCreateVideo'}}]));
+});

@@ -21,7 +21,7 @@ async function fixture(mode='normal'){
  const mock=http.createServer(async(req,res)=>{
    if(req.url==='/csrf-token'){res.setHeader('Set-Cookie','session=test');res.end(JSON.stringify({token:'csrf'}));return;}
    let raw='';for await(const chunk of req)raw+=chunk;
-   if(req.url.includes('/generate')){generations++;received=JSON.parse(raw);if(mode==='slow')await delay(250);res.end(JSON.stringify({choices:[{message:{content:generations===1?'I spotted a little bookshop and thought you might enjoy exploring it with me.':'There is a new astronomy exhibition at the museum; those photographs look wonderful.'}}]}));}
+   if(req.url.includes('/generate')){generations++;received=JSON.parse(raw);if(mode==='slow')await delay(250);res.end(JSON.stringify({choices:[{message:{content:mode==='dsml'?'<｜DSML｜ calls><｜DSML｜ invoke name="VeniceCreateSelfPortrait"><｜DSML｜ parameter name="prompt" string="true">Reading in a blue jumper.</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>':generations===1?'I spotted a little bookshop and thought you might enjoy exploring it with me.':'There is a new astronomy exhibition at the museum; those photographs look wonderful.'}}]}));}
    else if(req.url.includes('/sendMessage')){telegrams++;telegramBodies.push(JSON.parse(raw));assert(fs.existsSync(path.join(stateRoot,'state.json')));const saved=JSON.parse(fs.readFileSync(path.join(stateRoot,'state.json')));assert(saved.targets[id].pending.text);res.end(JSON.stringify({ok:true,result:{message_id:100}}));}
    else {res.statusCode=404;res.end();}
  });
@@ -78,5 +78,15 @@ test('settings and new journal files do not invalidate captured conversation',as
   const file=path.join(f.root,'settings.json'),s=JSON.parse(fs.readFileSync(file));s.extension_settings.journal={latestEntry:'new'};fs.writeFileSync(file,JSON.stringify(s));
   fs.mkdirSync(path.join(f.root,'user/files'),{recursive:true});fs.writeFileSync(path.join(f.root,'user/files/journal.md'),'Synthetic journal fixture');
   assert.equal((await f.api('/status')).data.targets[0].contextReady,true);
+ }finally{await f.cleanup();}
+});
+
+test('serialized portrait with unavailable image setup delivers an honest failure notice, never its prompt',async()=>{
+ const f=await fixture('dsml');try{
+  await until(()=>f.metrics().telegrams===1);
+  const body=f.metrics().telegramBodies[0];assert.match(body.text,/photo could not be created/);
+  assert(!body.text.includes('DSML'));assert(!body.text.includes('blue jumper'));
+  const p=(await f.api('/inbox',{avatar:'Mollie.png',chatId:'chat'})).data.pending;
+  assert.match(p.text,/photo could not be created/);assert.equal(p.imageUrl,undefined);
  }finally{await f.cleanup();}
 });

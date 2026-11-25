@@ -67,14 +67,43 @@ export function recoverRowKeys(snapshot,chat) {
     }
     return hits.length===1?rowKeys(chat.rows.slice(0,hits[0]+1)):null;
 }
-export function parseInitiation(content) {
-    const raw=String(content||'').trim();let result;
+export function hasToolMarkup(text) {
+    return /DSML|<\/?(?:tool_call|function_call|invoke|parameter)\b|\b(?:VeniceCreate(?:SelfPortrait|Image|Video|UserPortrait))\b|["'](?:tool_calls|imagePrompt|function_call)["']\s*:/i.test(String(text||''));
+}
+function portraitRequest(name,args,text='') {
+    if(name!=='VeniceCreateSelfPortrait'||typeof args?.prompt!=='string'||!args.prompt.trim()||args.prompt.length>1500)throw new Error('Unsupported model image command.');
+    if(hasToolMarkup(text))throw new Error('Raw tool markup in notification.');
+    return {text:text.trim(),imagePrompt:args.prompt.trim(),imageOnly:!text.trim()};
+}
+export function parseInitiation(content,toolCalls=[]) {
+    const raw=typeof content==='string'?content.trim():'';
+    if(toolCalls.length){
+        if(toolCalls.length!==1)throw new Error('Multiple model tools are not supported for initiation.');
+        let args;try{args=JSON.parse(toolCalls[0].function?.arguments);}catch{throw new Error('Invalid model image arguments.');}
+        return portraitRequest(toolCalls[0].function?.name,args,raw);
+    }
+    if(raw.includes('DSML')){
+        // DeepSeek can serialize a tool invocation inside content even when tools
+        // are disabled. Accept only one complete self-portrait command; nothing
+        // is evaluated, and neither its markup nor prompt becomes visible text.
+        const match=raw.match(/^<｜DSML｜\s*calls>\s*<｜DSML｜\s*invoke name="VeniceCreateSelfPortrait">\s*<｜DSML｜\s*parameter name="prompt" string="true">([\s\S]*?)<\/｜DSML｜\s*parameter>\s*<\/｜DSML｜\s*invoke>\s*<\/｜DSML｜\s*calls>$/u);
+        if(!match)throw new Error('Unrecognised model tool markup; notification withheld.');
+        const prompt=match[1].replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&amp;/g,'&');
+        return portraitRequest('VeniceCreateSelfPortrait',{prompt});
+    }
+    let result;
     try {result=JSON.parse(raw.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}catch{
         if(raw.startsWith('{')||raw.startsWith('```'))throw new Error('Invalid model notification format.');
         result={text:raw};
     }
-    if(typeof result.text!=='string'||result.text.trim().length<2||result.text.length>3500||/<think>|<analysis>/i.test(result.text))throw new Error('Invalid model notification text.');
-    return {text:result.text.trim(),imagePrompt:typeof result.imagePrompt==='string'?result.imagePrompt.trim().slice(0,1500):null};
+    if(!result||typeof result.text!=='string'||result.text.trim().length<2||result.text.length>3500||/<think>|<analysis>/i.test(result.text)||hasToolMarkup(result.text))throw new Error('Invalid model notification text; raw command withheld.');
+    if(result.imagePrompt!=null&&(typeof result.imagePrompt!=='string'||result.imagePrompt.length>1500||hasToolMarkup(result.imagePrompt)))throw new Error('Invalid model image prompt.');
+    return {text:result.text.trim(),imagePrompt:result.imagePrompt?.trim()||null};
+}
+export function visibleInitiationText(p,name){
+    if(hasToolMarkup(p.text))throw new Error('Raw model command cannot be delivered.');
+    if(p.text)return p.text;
+    return p.imageState==='ready'?`${name} shared a photo in SillyTavern.`:`${name}'s photo could not be created. You can request another in SillyTavern.`;
 }
 export function validateSnapshot(payload, chat) {
     if(payload.signature!==chat.signature || payload.chatHash!==chat.hash) throw new Error('Chat changed during context preparation. Refresh context after the reply has finished.');
