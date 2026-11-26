@@ -1,0 +1,1 @@
+{"name":"st-anam-avatar","version":"0.1.0","private":true,"type":"module","scripts":{"build":"esbuild client.js --bundle --format=esm --platform=browser --target=es2022 --external:../../../extensions.js --outfile=index.js --minify","test":"node --test *.test.mjs"},"dependencies":{"@anam-ai/js-sdk":"4.29.3","esbuild":"0.27.0"}}
