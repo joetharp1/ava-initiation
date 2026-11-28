@@ -1,0 +1,86 @@
+{
+  "services": {
+    "install": {
+      "image": "ghcr.io/sillytavern/sillytavern:1.19.0",
+      "pull_policy": "never",
+      "restart": "no",
+      "entrypoint": [
+        "node",
+        "-e",
+        "const fs=require('fs'),crypto=require('crypto');const base='https://raw.githubusercontent.com/joetharp1/ava-initiation/e72ab4c8fe828887023ac1bbf59abdc8742ac42f/server-telegram/';const hashes={\"server/core.mjs\":\"ac268619d48edc8c79e6ad2f2ff59b4c216dc4826e47159497096e1c3f363e3e\",\"server/server.mjs\":\"b5015e4c50f0a4d622f5e958e5a11a17ba98cfce26712edd42edb3bbd8dd1d45\",\"server/images.mjs\":\"6ce64e43f31a5fb2d26b1b9e17cbd46a348a758ae5ea8288e2fe58e30280bb1e\",\"server/reply-limit.mjs\":\"ea6c6305f4bc66ef7adf85a0f5c652a077ef5d789675bf5ab62c40eff4eb3e75\",\"client/index.js\":\"ee58ae00ace49fc53bb940ee2bf563522f9d71c0d841fe70f5fbc024e1807dc1\",\"client/manifest.json\":\"59e34c3549117b5ac07c234f9f5d507d19f0829bd4df237531eaa0032b80a74b\"};const digest=b=>crypto.createHash('sha256').update(b).digest('hex');async function get(p){const cached='/state/code/e72ab4c8/'+p;let b;if(fs.existsSync(cached)){b=fs.readFileSync(cached);if(digest(b)===hashes[p])return b;}const r=await fetch(base+p,{signal:AbortSignal.timeout(20000)});if(!r.ok)throw new Error('Source download failed '+r.status);b=Buffer.from(await r.arrayBuffer());if(digest(b)!==hashes[p])throw new Error('Source checksum mismatch');fs.mkdirSync(require('path').dirname(cached),{recursive:true});fs.writeFileSync(cached,b);return b;}(async()=>{const target='/st-data/default-user/extensions/astra-server-initiation',stamp=new Date().toISOString().replace(/[:.]/g,'-'),backup='/state/backups/'+stamp;fs.mkdirSync(backup,{recursive:true,mode:448});if(fs.existsSync(target)){if(!fs.existsSync(target+'/.astra-managed'))throw new Error('Unmanaged extension exists; stopped.');fs.cpSync(target,backup+'/previous-client',{recursive:true});}if(fs.existsSync('/state/state.json'))fs.copyFileSync('/state/state.json',backup+'/state.json');fs.copyFileSync('/st-data/default-user/settings.json',backup+'/settings.json');fs.chmodSync(backup+'/settings.json',384);fs.mkdirSync(target,{recursive:true});for(const p of ['client/index.js','client/manifest.json']){const b=await get(p),f=target+'/'+p.split('/').pop();fs.writeFileSync(f+'.tmp',b);fs.renameSync(f+'.tmp',f);fs.chmodSync(f,420);}fs.writeFileSync(target+'/.astra-managed','0.2.3');console.log('Client installed; existing settings backed up; chat files untouched.');})().catch(e=>{console.error(e.message);process.exit(1)});"
+      ],
+      "mem_limit": "128m",
+      "volumes": [
+        "data:/st-data",
+        "state:/state"
+      ],
+      "networks": [
+        "st"
+      ]
+    },
+    "worker": {
+      "image": "ghcr.io/sillytavern/sillytavern:1.19.0",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "entrypoint": [
+        "node",
+        "-e",
+        "const fs=require('fs'),crypto=require('crypto');const base='https://raw.githubusercontent.com/joetharp1/ava-initiation/e72ab4c8fe828887023ac1bbf59abdc8742ac42f/server-telegram/';const hashes={\"server/core.mjs\":\"ac268619d48edc8c79e6ad2f2ff59b4c216dc4826e47159497096e1c3f363e3e\",\"server/server.mjs\":\"b5015e4c50f0a4d622f5e958e5a11a17ba98cfce26712edd42edb3bbd8dd1d45\",\"server/images.mjs\":\"6ce64e43f31a5fb2d26b1b9e17cbd46a348a758ae5ea8288e2fe58e30280bb1e\",\"server/reply-limit.mjs\":\"ea6c6305f4bc66ef7adf85a0f5c652a077ef5d789675bf5ab62c40eff4eb3e75\",\"client/index.js\":\"ee58ae00ace49fc53bb940ee2bf563522f9d71c0d841fe70f5fbc024e1807dc1\",\"client/manifest.json\":\"59e34c3549117b5ac07c234f9f5d507d19f0829bd4df237531eaa0032b80a74b\"};const digest=b=>crypto.createHash('sha256').update(b).digest('hex');async function get(p){const cached='/state/code/e72ab4c8/'+p;let b;if(fs.existsSync(cached)){b=fs.readFileSync(cached);if(digest(b)===hashes[p])return b;}const r=await fetch(base+p,{signal:AbortSignal.timeout(20000)});if(!r.ok)throw new Error('Source download failed '+r.status);b=Buffer.from(await r.arrayBuffer());if(digest(b)!==hashes[p])throw new Error('Source checksum mismatch');fs.mkdirSync(require('path').dirname(cached),{recursive:true});fs.writeFileSync(cached,b);return b;}(async()=>{fs.mkdirSync('/tmp/app',{recursive:true});for(const p of ['server/core.mjs','server/images.mjs','server/reply-limit.mjs','server/server.mjs'])fs.writeFileSync('/tmp/app/'+p.split('/').pop(),await get(p));await import('/tmp/app/server.mjs');})().catch(e=>{console.error(e.message);process.exit(1)});"
+      ],
+      "depends_on": {
+        "install": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "read_only": true,
+      "tmpfs": [
+        "/tmp:size=32m"
+      ],
+      "mem_limit": "384m",
+      "cpus": 0.5,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "environment": {
+        "NODE_ENV": "production",
+        "ST_URL": "http://sillytavern:8000",
+        "PUBLIC_ORIGIN": "https://sillytavern-jjhy.marchandwren.com"
+      },
+      "volumes": [
+        "data:/st-data:ro",
+        "state:/state"
+      ],
+      "networks": [
+        "st"
+      ],
+      "labels": [
+        "traefik.enable=true",
+        "traefik.docker.network=sillytavern-jjhy_default",
+        "traefik.http.routers.astra-initiation.rule=Host(`sillytavern-jjhy.marchandwren.com`) && PathPrefix(`/astra-initiation/`)",
+        "traefik.http.routers.astra-initiation.priority=100",
+        "traefik.http.routers.astra-initiation.entrypoints=websecure",
+        "traefik.http.routers.astra-initiation.tls.certresolver=letsencrypt",
+        "traefik.http.services.astra-initiation.loadbalancer.server.port=8787"
+      ],
+      "env_file": [
+        "/docker/sillytavern-jjhy/.env"
+      ]
+    }
+  },
+  "volumes": {
+    "data": {
+      "external": true,
+      "name": "sillytavern-jjhy_sillytavern-data"
+    },
+    "state": {}
+  },
+  "networks": {
+    "st": {
+      "external": true,
+      "name": "sillytavern-jjhy_default"
+    }
+  }
+}
