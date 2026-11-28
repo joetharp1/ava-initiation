@@ -1,3 +1,4 @@
+import {UNANSWERED_LIMIT,seedReplyLimit,observeReply,reserveInitiation} from './reply-limit.mjs';
 import fs from 'node:fs';
 import {imageSettings,generateStill} from './images.mjs';
 import path from 'node:path';
@@ -41,14 +42,32 @@ for(const t of Object.values(state.targets)){
     t.awaitingReply=false;t.lease=null;t.pending=t.queue.find(p=>!p.imported)||null;
 }
 state.version=2;
+state.replyLimits ||= {};
+for(const avatar of new Set(Object.values(state.targets).map(t=>t.avatar))){
+    if(state.replyLimits[avatar])continue;
+    const bindings=Object.values(state.targets).filter(t=>t.avatar===avatar).map(target=>{
+        let rows=[];try{rows=readFor(target).rows;}catch{}
+        return {target,rows};
+    });
+    state.replyLimits[avatar]=seedReplyLimit(bindings);
+}
 save();
 let running=false;
 let browserActivity=0;
 const settings=()=>JSON.parse(fs.readFileSync(path.join(ROOT,'settings.json'),'utf8'));
-function publicTarget(t){const p=t.queue.find(p=>!p.imported);let contextReady=false;try{contextReady=current(t);}catch{}
-return {id:t.id,avatar:t.avatar,chatId:t.chatId,name:t.name,enabled:t.enabled,nextAt:t.nextAt,quietStart:t.quietStart,quietEnd:t.quietEnd,min:t.min,max:t.max,awaitingReply:false,job:t.job?{id:t.job.id,stage:t.job.stage}:null,pending:p?{id:p.id,createdAt:p.createdAt,telegramState:p.telegramState,imported:false}:null,pendingCount:t.queue.filter(p=>!p.imported).length,imagesEnabled:!!imageConfig(t),snapshotAt:t.snapshot?.createdAt,contextReady,lastError:t.lastError||null};}
+function publicTarget(t){const gate=replyLimit(t);const p=t.queue.find(p=>!p.imported);let contextReady=false;try{contextReady=current(t);}catch{}
+return {id:t.id,avatar:t.avatar,chatId:t.chatId,name:t.name,enabled:t.enabled,nextAt:t.nextAt,quietStart:t.quietStart,quietEnd:t.quietEnd,min:t.min,max:t.max,awaitingReply:gate.count>=UNANSWERED_LIMIT,unansweredCount:gate.count,unansweredLimit:UNANSWERED_LIMIT,job:t.job?{id:t.job.id,stage:t.job.stage}:null,pending:p?{id:p.id,createdAt:p.createdAt,telegramState:p.telegramState,imported:false}:null,pendingCount:t.queue.filter(p=>!p.imported).length,imagesEnabled:!!imageConfig(t),snapshotAt:t.snapshot?.createdAt,contextReady,lastError:t.lastError||null};}
 const getTarget=b=>{const id=targetId(b.avatar,b.chatId);const t=state.targets[id];if(!t)throw new Error('This chat has not been enabled.');return t;};
 function readFor(t){return readChat(ROOT,t.avatar,t.chatId);}
+function replyLimit(t){
+    let gate=state.replyLimits[t.avatar];
+    const chat=readFor(t);
+    if(!gate){gate=state.replyLimits[t.avatar]=seedReplyLimit([{target:t,rows:chat.rows}]);save();}
+    const before=JSON.stringify(gate);
+    observeReply(gate,t.chatId,chat.rows);
+    if(before!==JSON.stringify(gate))save();
+    return gate;
+}
 function baseline(avatar,chatId){const c=readChat(ROOT,avatar,chatId);return {signature:c.signature,chatHash:c.hash,sourceHash:sourceFingerprint(ROOT,avatar)};}
 function nextDelay(t){return (t.min+Math.random()*(t.max-t.min))*60000;}
 function activityBlocks(t){return t.test?browserActivity>(t.testArmedAt||0):browserActivity>Date.now()-90000;}
@@ -88,7 +107,7 @@ async function notify(t,p){
     event('telegram-delivered',t.id,'Message saved in the server inbox; awaiting chat import.');
 }
 async function run(t){
-    if(running)return;
+    if(running||replyLimit(t).count>=UNANSWERED_LIMIT)return;
     running=true;
     const id=crypto.randomUUID();
     try{
@@ -123,6 +142,7 @@ async function run(t){
         if(text&&repeatText(text,[...chat.rows.filter(m=>!m.is_user&&!m.is_system).slice(-8).map(m=>m.mes),...t.queue.slice(-30).map(p=>p.text)]))throw new Error('Repeated message rejected. No replacement request was made.');
         if(!t.enabled||!current(t)||readFor(t).hash!==chat.hash||activityBlocks(t))throw new Error('Conversation activity changed or initiation was paused while generating; the message was not sent.');
         const p={id,text,createdAt:Date.now(),baseHash:chat.hash,baseSignature:chat.signature,telegramState:'not-sent',imported:false,imageState:'none',imageOnly};
+        reserveInitiation(replyLimit(t));
         t.queue.push(p);t.pending=t.queue.find(p=>!p.imported)||null;
         t.awaitingReply=false;t.test=false;t.nextAt=Date.now()+nextDelay(t);
         const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/London'}).format(new Date());
@@ -145,18 +165,21 @@ async function tick(){if(running)return;
         const unsent=t.enabled&&t.queue.find(p=>p.telegramState==='not-sent');
         if(unsent){running=true;try{unsent.text=visibleInitiationText(unsent,t.name);save();await notify(t,unsent);}catch{t.lastError='Telegram delivery failed; no automatic resend.';save();}finally{running=false;}return;}
     }
-    for(const t of Object.values(state.targets).sort((a,b)=>a.nextAt-b.nextAt)){if(eligible(t,Date.now())){await run(t);break;}}
+    for(const t of Object.values(state.targets).sort((a,b)=>a.nextAt-b.nextAt)){if(replyLimit(t).count<UNANSWERED_LIMIT&&eligible(t,Date.now())){await run(t);break;}}
 }
 
 async function dispatch(route,b){
-    if(route==='/status')return {version:'0.2.2',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
+    if(route==='/status')return {version:'0.2.3',running,targets:Object.values(state.targets).map(publicTarget),events:state.events.slice(-15),telegramConfigured:!!settings().extension_settings?.['ava-initiation']?.telegramToken};
     if(route==='/baseline')return baseline(b.avatar,b.chatId);
     if(route==='/activity'){browserActivity=Date.now();return {ok:true};}
     if(route==='/move'){
         const source=getTarget(b),chatId=safeName(b.toChatId);
         if(chatId===source.chatId)return publicTarget(source);
         if(source.job||source.lease?.expires>Date.now())throw Error('Wait for the running attempt or import to finish before moving chats.');
-        readChat(ROOT,source.avatar,chatId); // Same companion directory; destination must exist.
+        const destinationChat=readChat(ROOT,source.avatar,chatId); // Same companion directory; destination must exist.
+        const gate=replyLimit(source);
+        // Establish destination baseline without resetting the companion's counter.
+        if(!Object.hasOwn(gate.observedUsers,chatId))observeReply(gate,chatId,destinationChat.rows);
         const id=targetId(source.avatar,chatId);
         let dest=state.targets[id];
         if(dest?.job||dest?.lease?.expires>Date.now())throw Error('The destination chat is busy.');
@@ -180,6 +203,7 @@ async function dispatch(route,b){
         if(!t){if(b.enable!==true)throw new Error('Enable this chat first.');t=state.targets[id]={id,avatar:b.avatar,chatId:b.chatId,name:String(b.name).slice(0,100),enabled:true,min:Math.max(15,Number(a.min)||60),max:Math.max(15,Number(a.max)||120),quietStart:a.quietStart||'23:00',quietEnd:a.quietEnd||'08:00'};t.max=Math.max(t.min,t.max);}
         if(t.job)throw new Error('An initiation is already running.');
         t.queue ||= [];
+        replyLimit(t);
         // Retain every unimported item. Only archive receipts verified in the saved chat.
         const done=t.queue.filter(p=>p.imported&&chat.rows.some(m=>m.extra?.server_initiation?.id===p.id));
         t.archive=[...(t.archive||[]),...done].slice(-50);
@@ -195,6 +219,7 @@ async function dispatch(route,b){
     if(route==='/test'){
         const t=getTarget(b);
         if(t.job)throw new Error('An attempt is already running.');
+        if(replyLimit(t).count>=UNANSWERED_LIMIT)throw new Error('Reply in SillyTavern before starting another initiation test.');
         if(!t.snapshot||!current(t))throw new Error('Refresh this chat’s server context first.');
         t.enabled=true;t.awaitingReply=false;t.lastError=null;t.test=true;t.testArmedAt=Date.now();t.nextAt=Date.now()+60000;save();event('test-armed',t.id,'One server-owned test in 60 seconds.');return publicTarget(t);
     }

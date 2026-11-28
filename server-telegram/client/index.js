@@ -26,7 +26,7 @@ panel.innerHTML=`<div class="inline-drawer-toggle inline-drawer-header"><b>Serve
 <button type="button" class="menu_button" data-action="pause">Pause this chat</button>
 <button type="button" class="menu_button" data-action="status">Check status</button>
 <p data-status role="status" style="white-space:pre-wrap;overflow-wrap:anywhere">Checking server…</p>
-<small>No daily quota · follow-ups without a reply · text and optional still images · no videos · existing interval and quiet hours · Europe/London.<br>Telegram receives text only. Text and pictures are saved in your server inbox and imported here when you return. Reply in SillyTavern; Telegram replies are not connected yet.</small></div>`;
+<small>Up to four initiations per companion until you reply · no daily quota · text and optional still images · no videos · existing interval and quiet hours · Europe/London.<br>Telegram receives text only. Text and pictures are saved in your server inbox and imported here when you return. Reply in SillyTavern; Telegram replies are not connected yet.</small></div>`;
 const out=panel.querySelector('[data-status]');
 function say(text){out.textContent=text;}
 function stateFor(t){return lastStatus?.targets.find(x=>x.avatar===t.avatar&&x.chatId===t.chatId);}
@@ -36,7 +36,7 @@ async function status(){
     panel.querySelector('[data-action="move"]').hidden=!other;
     if(!t||!t.enabled&&other){say(other?`${other.name} is enabled in another chat: ${other.chatId}. ${other.pendingCount||0} message(s) are waiting there. Use this chat instead to move pending messages and prepare this conversation's context.`:'Server connected. Open the companion chat you want, then Enable this chat.');return;}
     const date=n=>new Date(n).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    say(`${t.name}: ${t.enabled?'enabled':'paused'}\n${t.job?'Preparing a message…':`Next check: ${date(t.nextAt)} (${t.min}–${t.max} minute interval).`}\n${t.pendingCount||0} waiting to import · images ${t.imagesEnabled?'available':'need a saved reference'} · Telegram text only.\n${!t.contextReady?'Context refresh needed. ':''}${t.lastError||''}`);
+    say(`${t.name}: ${t.enabled?'enabled':'paused'}\n${t.awaitingReply?'Waiting for your reply · four initiations reached.':t.job?'Preparing a message…':`Next check: ${date(t.nextAt)} (${t.min}–${t.max} minute interval).`}\n${t.unansweredCount||0}/${t.unansweredLimit||4} unanswered · ${t.pendingCount||0} waiting to import · images ${t.imagesEnabled?'available':'need a saved reference'} · Telegram text only.\n${!t.contextReady?'Context refresh needed. ':''}${t.lastError||''}`);
 }
 async function activity(){if(Date.now()-lastActivity<10000)return;lastActivity=Date.now();try{await api('/activity');}catch{}}
 function occupied(){return host.isGenerating()||String(document.getElementById('send_textarea')?.value||'').trim();}

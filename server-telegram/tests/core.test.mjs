@@ -21,7 +21,7 @@ test('exact and close repeats rejected, fresh text accepted',()=>{
  assert(!repeatText('I found a new book that reminded me of our conversation.',['How was your day?']));
  assert(!repeatText('I found a new book that reminded me of our conversation.',['','I','Hi','A photo.']));
 });
-test('no daily quota or reply gate; pacing, pause and quiet hours remain',()=>{
+test('pacing eligibility preserves quiet hours; reply limit is enforced separately',()=>{
  const now=Date.parse('2026-11-25T04:00:00Z');const t={enabled:true,snapshot:{},nextAt:now-1,quietStart:'23:00',quietEnd:'08:00'};
  assert(!eligible(t,now));assert(eligible({...t,test:true},now));
  assert(eligible({...t,test:true,awaitingReply:true,dayCount:100},now));

@@ -21,7 +21,7 @@ async function fixture(mode='normal'){
  const mock=http.createServer(async(req,res)=>{
    if(req.url==='/csrf-token'){res.setHeader('Set-Cookie','session=test');res.end(JSON.stringify({token:'csrf'}));return;}
    let raw='';for await(const chunk of req)raw+=chunk;
-   if(req.url.includes('/generate')){generations++;received=JSON.parse(raw);if(mode==='slow')await delay(250);res.end(JSON.stringify({choices:[{message:{content:mode==='dsml'?'<｜DSML｜ calls><｜DSML｜ invoke name="VeniceCreateSelfPortrait"><｜DSML｜ parameter name="prompt" string="true">Reading in a blue jumper.</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>':generations===1?'I spotted a little bookshop and thought you might enjoy exploring it with me.':'There is a new astronomy exhibition at the museum; those photographs look wonderful.'}}]}));}
+   if(req.url.includes('/generate')){generations++;received=JSON.parse(raw);if(mode==='slow')await delay(250);res.end(JSON.stringify({choices:[{message:{content:mode==='cap'?['A curious fox wandered past the garden gate this morning.', 'I finally finished that mystery novel; the ending surprised me.', 'The tiny bakery nearby has started selling cinnamon pastries.', 'There is a meteor shower forecast tonight, perfect for stargazing.', 'My paintbrushes are cleaned and ready for a fresh landscape.'][generations-1]:mode==='dsml'?'<｜DSML｜ calls><｜DSML｜ invoke name="VeniceCreateSelfPortrait"><｜DSML｜ parameter name="prompt" string="true">Reading in a blue jumper.</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>':generations===1?'I spotted a little bookshop and thought you might enjoy exploring it with me.':'There is a new astronomy exhibition at the museum; those photographs look wonderful.'}}]}));}
    else if(req.url.includes('/sendMessage')){telegrams++;telegramBodies.push(JSON.parse(raw));assert(fs.existsSync(path.join(stateRoot,'state.json')));const saved=JSON.parse(fs.readFileSync(path.join(stateRoot,'state.json')));assert(saved.targets[id].pending.text);res.end(JSON.stringify({ok:true,result:{message_id:100}}));}
    else {res.statusCode=404;res.end();}
  });
@@ -107,5 +107,31 @@ test('moving a companion binding transfers outstanding receipts once and waits f
   assert.equal((await f.api('/ack',{...dest,id:pending.id})).status,200);
   assert.equal((await f.api('/status')).data.targets.find(t=>t.chatId==='chat').enabled,false);
   assert.equal((await f.api('/move',{...dest,toChatId:'../Ava/current'})).status,400);
+ }finally{await f.cleanup();}
+});
+
+
+test('four unanswered initiations stop generation and tests; restart/import/refresh preserve cap and a user reply resets it',async()=>{
+ const f=await fixture('cap');try{
+  const file=path.join(f.stateRoot,'state.json'),identity={avatar:'Mollie.png',chatId:'chat'};
+  async function due(){await f.stop();const state=JSON.parse(fs.readFileSync(file));state.targets[f.id].nextAt=0;atomicWrite(file,state);f.start();await until(async()=>{try{return (await f.api('/status')).status===200;}catch{return false;}});}
+  for(let n=1;n<=4;n++){if(n>1)await due();await until(()=>f.metrics().telegrams===n);}
+  let t=(await f.api('/status')).data.targets[0];assert.equal(t.unansweredCount,4);assert.equal(t.awaitingReply,true);
+  await due();await delay(200);assert.equal(f.metrics().generations,4);assert.equal(f.metrics().telegrams,4);
+  assert.equal((await f.api('/test',identity)).status,400);
+  for(let i=0;i<4;i++){
+   const p=(await f.api('/inbox',identity)).data.pending;
+   fs.appendFileSync(f.chatFile,'\n'+JSON.stringify({is_user:false,mes:p.text,extra:{server_initiation:{id:p.id,createdAt:p.createdAt}}}));
+   assert.equal((await f.api('/ack',{...identity,id:p.id})).status,200);
+  }
+  async function refresh(){const chat=readChat(f.root,identity.avatar,identity.chatId),saved=JSON.parse(fs.readFileSync(file));return f.api('/snapshot',{...identity,name:'Mollie',enable:true,signature:chat.signature,chatHash:chat.hash,sourceHash:sourceFingerprint(f.root,identity.avatar),params:saved.targets[f.id].snapshot.params});}
+  await f.api('/pause',identity);assert.equal((await refresh()).status,200);
+  assert.equal((await f.api('/status')).data.targets[0].unansweredCount,4);
+  await due();await delay(200);assert.equal(f.metrics().generations,4);
+  fs.appendFileSync(f.chatFile,'\n'+JSON.stringify({is_user:true,mes:'Yes, I would enjoy that.'})+'\n'+JSON.stringify({is_user:false,mes:'We can make a lovely evening of it.'}));
+  assert.equal((await refresh()).status,200);
+  assert.equal((await f.api('/status')).data.targets[0].unansweredCount,0);
+  await due();await until(()=>f.metrics().telegrams===5);
+  assert.equal((await f.api('/status')).data.targets[0].unansweredCount,1);
  }finally{await f.cleanup();}
 });
